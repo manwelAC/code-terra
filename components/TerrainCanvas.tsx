@@ -589,12 +589,15 @@ export default function TerrainCanvas({
   const renderedPanRef = useRef<Point>({ x: 0, y: 0 });
   const skipTransitionRef = useRef(false);
   const walkReturnViewRef = useRef<{ pan: Point; zoom: number } | null>(null);
+  const walkReadyTimeoutRef = useRef<number | null>(null);
   const [size, setSize] = useState<Size>({ width: 900, height: 642 });
   const [pan, setPan] = useState<Point>({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const [isNavigating, setIsNavigating] = useState(false);
   const [isArranging, setIsArranging] = useState(false);
   const [isWalkTransitioning, setIsWalkTransitioning] = useState(false);
+  const [isWalkModeLoading, setIsWalkModeLoading] = useState(false);
+  const [isWalkModeSettling, setIsWalkModeSettling] = useState(false);
   const [atlasTransitionLabel, setAtlasTransitionLabel] = useState<string | null>(null);
   const [atlasMode, setAtlasMode] = useState<AtlasMode>("terra");
   const [armedRepositoryId, setArmedRepositoryId] = useState<string | null>(null);
@@ -851,6 +854,7 @@ export default function TerrainCanvas({
   useEffect(() => () => {
     if (animationFrameRef.current !== null) cancelAnimationFrame(animationFrameRef.current);
     if (panFrameRef.current !== null) cancelAnimationFrame(panFrameRef.current);
+    if (walkReadyTimeoutRef.current !== null) window.clearTimeout(walkReadyTimeoutRef.current);
   }, []);
 
   const renderTerrainFrame = useCallback((framePan: Point, frameZoom: number, transition = false) => {
@@ -930,7 +934,16 @@ export default function TerrainCanvas({
     });
   }, []);
 
+  const clearWalkReadyTimer = useCallback(() => {
+    if (walkReadyTimeoutRef.current !== null) {
+      window.clearTimeout(walkReadyTimeoutRef.current);
+      walkReadyTimeoutRef.current = null;
+    }
+  }, []);
+
   const transitionIntoWalkMode = useCallback(() => {
+    clearWalkReadyTimer();
+    setIsWalkModeSettling(false);
     if (panFrameRef.current !== null) cancelAnimationFrame(panFrameRef.current);
     panFrameRef.current = null;
     if (animationFrameRef.current !== null) {
@@ -962,7 +975,10 @@ export default function TerrainCanvas({
     if (reducedMotion) {
       setPan(targetPan);
       onZoomChange(targetZoom);
-      setAtlasMode("walk");
+      setIsWalkTransitioning(true);
+      setIsWalkModeLoading(true);
+      setAtlasTransitionLabel("Entering Walk Mode...");
+      requestAnimationFrame(() => setAtlasMode("walk"));
       return;
     }
 
@@ -989,22 +1005,20 @@ export default function TerrainCanvas({
       } else {
         panFrameRef.current = null;
         skipTransitionRef.current = true;
-        renderTerrainFrame(targetPan, targetZoom);
         setPan(targetPan);
         onZoomChange(targetZoom);
         setIsNavigating(false);
-        setAtlasMode("walk");
-        window.setTimeout(() => {
-          setIsWalkTransitioning(false);
-          setAtlasTransitionLabel(null);
-        }, 420);
+        setIsWalkModeLoading(true);
+        setAtlasTransitionLabel("Entering Walk Mode...");
+        requestAnimationFrame(() => setAtlasMode("walk"));
       }
     };
 
     panFrameRef.current = requestAnimationFrame(transitionFrame);
-  }, [availableRepositories, clampPan, lastWalkPosition, onCloseMapKey, onZoomChange, renderTerrainFrame, selectedId, size]);
+  }, [availableRepositories, clampPan, clearWalkReadyTimer, lastWalkPosition, onCloseMapKey, onZoomChange, renderTerrainFrame, selectedId, size]);
 
   const transitionBackToTerraView = useCallback(() => {
+    clearWalkReadyTimer();
     if (panFrameRef.current !== null) cancelAnimationFrame(panFrameRef.current);
     panFrameRef.current = null;
     if (animationFrameRef.current !== null) {
@@ -1020,6 +1034,8 @@ export default function TerrainCanvas({
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     setAtlasMode("terra");
+    setIsWalkModeLoading(false);
+    setIsWalkModeSettling(false);
     setIsArranging(false);
     setArmedRepositoryId(null);
     setDetailsRepositoryId(null);
@@ -1063,15 +1079,18 @@ export default function TerrainCanvas({
     };
 
     panFrameRef.current = requestAnimationFrame(transitionFrame);
-  }, [onCloseMapKey, onZoomChange, renderTerrainFrame]);
+  }, [clearWalkReadyTimer, onCloseMapKey, onZoomChange, renderTerrainFrame]);
 
   const switchAtlasMode = useCallback((mode: AtlasMode) => {
+    clearWalkReadyTimer();
     if (panFrameRef.current !== null) {
       cancelAnimationFrame(panFrameRef.current);
       panFrameRef.current = null;
     }
     setIsNavigating(false);
     setIsWalkTransitioning(false);
+    setIsWalkModeLoading(false);
+    setIsWalkModeSettling(false);
     setAtlasTransitionLabel(null);
     setIsArranging(false);
     setArmedRepositoryId(null);
@@ -1086,7 +1105,20 @@ export default function TerrainCanvas({
       return;
     }
     setAtlasMode(mode);
-  }, [atlasMode, onCloseMapKey, transitionBackToTerraView, transitionIntoWalkMode]);
+  }, [atlasMode, clearWalkReadyTimer, onCloseMapKey, transitionBackToTerraView, transitionIntoWalkMode]);
+
+  const handleWalkModeReady = useCallback(() => {
+    clearWalkReadyTimer();
+    setIsWalkModeLoading(false);
+    setIsWalkModeSettling(true);
+    setAtlasTransitionLabel("Walk Mode Ready");
+    walkReadyTimeoutRef.current = window.setTimeout(() => {
+      walkReadyTimeoutRef.current = null;
+      setIsWalkModeSettling(false);
+      setIsWalkTransitioning(false);
+      setAtlasTransitionLabel(null);
+    }, 560);
+  }, [clearWalkReadyTimer]);
 
   const terrainAtPoint = useCallback(
     (point: Point) => {
@@ -1447,6 +1479,17 @@ export default function TerrainCanvas({
         </div>
       )}
 
+      {(isWalkModeLoading || isWalkModeSettling) && (
+        <div className={`walk-mode-loading walk-handoff-loading${isWalkModeSettling ? " is-exiting" : ""}`} role="status" aria-live="polite">
+          <span className="walk-mode-loading-scan" aria-hidden="true"/>
+          <span className="walk-mode-loading-orbit" aria-hidden="true"/>
+          <p>Entering Walk Mode...</p>
+          <strong>Preparing terrain</strong>
+          <small>Loading first-person atlas</small>
+          <span className="walk-mode-loading-progress" aria-hidden="true"/>
+        </div>
+      )}
+
       {isImmersive && atlasMode === "walk" && (
         <WalkModeScene
           repositories={availableRepositories}
@@ -1455,6 +1498,7 @@ export default function TerrainCanvas({
           language={language}
           onSelect={onSelect}
           onPositionChange={handleWalkPositionChange}
+          onReady={handleWalkModeReady}
           initialPosition={lastWalkPosition}
         />
       )}

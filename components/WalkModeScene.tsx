@@ -12,6 +12,7 @@ type WalkModeSceneProps = {
   language: LanguageFilter;
   onSelect: (id: string) => void;
   onPositionChange?: (position: WalkModePosition) => void;
+  onReady?: () => void;
   initialPosition?: WalkModePosition | null;
 };
 
@@ -344,10 +345,11 @@ function disposeObject(object: THREE.Object3D) {
   });
 }
 
-export default function WalkModeScene({ repositories, selectedId, year, language, onSelect, onPositionChange, initialPosition }: WalkModeSceneProps) {
+export default function WalkModeScene({ repositories, selectedId, year, language, onSelect, onPositionChange, onReady, initialPosition }: WalkModeSceneProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const onSelectRef = useRef(onSelect);
   const onPositionChangeRef = useRef(onPositionChange);
+  const onReadyRef = useRef(onReady);
   const selectedIdRef = useRef(selectedId);
   const initialPositionRef = useRef(initialPosition);
   const [pointerLocked, setPointerLocked] = useState(false);
@@ -361,6 +363,10 @@ export default function WalkModeScene({ repositories, selectedId, year, language
   useEffect(() => {
     onPositionChangeRef.current = onPositionChange;
   }, [onPositionChange]);
+
+  useEffect(() => {
+    onReadyRef.current = onReady;
+  }, [onReady]);
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
@@ -659,6 +665,7 @@ export default function WalkModeScene({ repositories, selectedId, year, language
       if (!readyReported) {
         readyReported = true;
         setSceneReady(true);
+        onReadyRef.current?.();
       }
       animationFrame = requestAnimationFrame(animate);
     };
