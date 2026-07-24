@@ -693,7 +693,8 @@ main {
 .terrain-stage.is-arranging .terrain-canvas { cursor: crosshair; }
 .terrain-stage.is-arranging.is-dragging .terrain-canvas { cursor: grabbing; }
 .terrain-canvas:focus-visible { box-shadow: inset 0 0 0 2px rgba(216,245,106,.48); }
-.terrain-stage.is-timeline .terrain-canvas { opacity: 0; pointer-events: none; }
+.terrain-stage.is-timeline .terrain-canvas,
+.terrain-stage.is-walk .terrain-canvas { opacity: 0; pointer-events: none; }
 
 .fullscreen-control {
   position: absolute;
@@ -837,6 +838,135 @@ main {
   border-radius: 50%;
   background: var(--lime);
   box-shadow: 4px 4px 0 #fff;
+}
+
+.atlas-mode-toggle.is-walk i {
+  border: 1px solid currentColor;
+  transform: perspective(24px) rotateX(58deg);
+}
+
+.atlas-mode-toggle.is-walk i::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: -4px;
+  width: 1px;
+  height: 18px;
+  background: currentColor;
+  transform: rotate(32deg);
+}
+
+.walk-mode-scene {
+  position: absolute;
+  inset: 54px 0 0;
+  z-index: 8;
+  overflow: hidden;
+  background: #07110d;
+}
+
+.walk-mode-canvas-host,
+.walk-mode-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.walk-mode-canvas {
+  display: block;
+  cursor: crosshair;
+}
+
+.walk-reticle {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 3;
+  width: 20px;
+  height: 20px;
+  border: 1px solid rgba(216,245,106,.42);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.walk-reticle::before,
+.walk-reticle::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  background: rgba(216,245,106,.72);
+  transform: translate(-50%, -50%);
+}
+
+.walk-reticle::before { width: 28px; height: 1px; }
+.walk-reticle::after { width: 1px; height: 28px; }
+
+.walk-mode-hud {
+  position: absolute;
+  left: 20px;
+  bottom: 22px;
+  z-index: 3;
+  display: grid;
+  gap: 6px;
+  min-width: 250px;
+  max-width: min(390px, calc(100% - 40px));
+  padding: 14px 16px;
+  border: 1px solid rgba(216,245,106,.18);
+  background: rgba(7,17,13,.78);
+  color: #fff;
+  backdrop-filter: blur(14px);
+  pointer-events: none;
+}
+
+.walk-mode-hud p {
+  margin: 0;
+  color: #a6b2aa;
+  font-family: var(--font-mono), monospace;
+  font-size: 9px;
+  letter-spacing: .08em;
+}
+
+.walk-mode-hud strong {
+  overflow: hidden;
+  font-size: 16px;
+  font-weight: 650;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.walk-mode-hud span {
+  color: #c7d3c9;
+  font-family: var(--font-mono), monospace;
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.walk-mode-prompt {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 4;
+  display: grid;
+  gap: 8px;
+  min-width: 220px;
+  padding: 15px 18px;
+  border: 1px solid rgba(216,245,106,.34);
+  background: rgba(7,17,13,.86);
+  color: var(--lime);
+  font-family: var(--font-mono), monospace;
+  font-size: 11px;
+  text-transform: uppercase;
+  transform: translate(-50%, -50%);
+  cursor: pointer;
+  backdrop-filter: blur(14px);
+}
+
+.walk-mode-prompt span {
+  color: #dce4dc;
+  font-size: 8px;
+  font-weight: 400;
 }
 
 .timeline-atlas-view {

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import WalkModeScene from "@/components/WalkModeScene";
 import {
   compactNumber,
   getLanguageFilters,
@@ -53,7 +54,7 @@ type DragState = {
   terrainOrigin?: TerrainPosition;
   terrainWasCustomized?: boolean;
 };
-type AtlasMode = "terra" | "timeline";
+type AtlasMode = "terra" | "timeline" | "walk";
 
 const labelNumber = (value: number) => String(value + 1).padStart(2, "0");
 const MIN_ZOOM = 80;
@@ -792,12 +793,12 @@ export default function TerrainCanvas({
     onToggleMapKey();
   }, [onToggleMapKey]);
 
-  const toggleAtlasMode = useCallback(() => {
+  const switchAtlasMode = useCallback((mode: AtlasMode) => {
     setIsArranging(false);
     setArmedRepositoryId(null);
     setDetailsRepositoryId(null);
     onCloseMapKey();
-    setAtlasMode((current) => current === "terra" ? "timeline" : "terra");
+    setAtlasMode(mode);
   }, [onCloseMapKey]);
 
   const terrainAtPoint = useCallback(
@@ -1002,15 +1003,15 @@ export default function TerrainCanvas({
   }, [atlasMode, clampPan, isImmersive, onZoomChange, resetView, zoom]);
 
   return (
-    <div className={`terrain-stage${isDragging ? " is-dragging" : ""}${isNavigating ? " is-navigating" : ""}${isArranging ? " is-arranging" : ""}${isImmersive ? " is-immersive" : ""}${isImmersive && atlasMode === "timeline" ? " is-timeline" : ""}`} ref={wrapperRef}>
+    <div className={`terrain-stage${isDragging ? " is-dragging" : ""}${isNavigating ? " is-navigating" : ""}${isArranging ? " is-arranging" : ""}${isImmersive ? " is-immersive" : ""}${isImmersive && atlasMode === "timeline" ? " is-timeline" : ""}${isImmersive && atlasMode === "walk" ? " is-walk" : ""}`} ref={wrapperRef}>
       <canvas
         ref={canvasRef}
         className="terrain-canvas"
         aria-label={isArranging
           ? "Arrange terrain map. Drag a terrain to move it, or drag empty space to pan."
           : `Interactive repository map. Drag or use arrow keys to move the map${isImmersive ? ", and use the visible controls to zoom" : ""}.`}
-        aria-hidden={isImmersive && atlasMode === "timeline"}
-        tabIndex={isImmersive && atlasMode === "timeline" ? -1 : 0}
+        aria-hidden={isImmersive && atlasMode !== "terra"}
+        tabIndex={isImmersive && atlasMode !== "terra" ? -1 : 0}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={(event) => finishPointerInteraction(event)}
@@ -1045,14 +1046,17 @@ export default function TerrainCanvas({
             <strong>{timelineRepositories.length} REPOSITORIES IN VIEW</strong>
           </div>
           <nav aria-label="Atlas navigation and controls">
-            <button
-              type="button"
-              className={`atlas-mode-toggle is-${atlasMode}`}
-              onClick={toggleAtlasMode}
-              aria-label={`Switch to ${atlasMode === "terra" ? "Timeline View" : "Terra View"}`}
-            >
+            <button type="button" className={`atlas-mode-toggle is-terra${atlasMode === "terra" ? " active" : ""}`} onClick={() => switchAtlasMode("terra")} aria-pressed={atlasMode === "terra"}>
               <i aria-hidden="true"/>
-              {atlasMode === "terra" ? "Terra View" : "Timeline View"}
+              Terra View
+            </button>
+            <button type="button" className={`atlas-mode-toggle is-timeline${atlasMode === "timeline" ? " active" : ""}`} onClick={() => switchAtlasMode("timeline")} aria-pressed={atlasMode === "timeline"}>
+              <i aria-hidden="true"/>
+              Timeline View
+            </button>
+            <button type="button" className={`atlas-mode-toggle is-walk${atlasMode === "walk" ? " active" : ""}`} onClick={() => switchAtlasMode("walk")} aria-pressed={atlasMode === "walk"}>
+              <i aria-hidden="true"/>
+              Walk Mode
             </button>
             {atlasMode === "terra" && (
               <button
@@ -1148,6 +1152,10 @@ export default function TerrainCanvas({
             </div>
           </div>
         </section>
+      )}
+
+      {isImmersive && atlasMode === "walk" && (
+        <WalkModeScene repositories={availableRepositories} selectedId={selectedId} year={year} language={language} onSelect={onSelect} />
       )}
 
       {atlasMode === "terra" && selectedTerrain && (
