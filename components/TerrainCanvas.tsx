@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import WalkModeScene from "@/components/WalkModeScene";
+import WalkModeScene, { type WalkModePosition } from "@/components/WalkModeScene";
 import {
   compactNumber,
   getLanguageFilters,
@@ -58,7 +58,8 @@ type AtlasMode = "terra" | "timeline" | "walk";
 
 const labelNumber = (value: number) => String(value + 1).padStart(2, "0");
 const MIN_ZOOM = 80;
-const MAX_ZOOM = 140;
+const MAX_ZOOM = 280;
+const WALK_ENTRY_ZOOM = 280;
 const TERRAIN_LAYOUT_STORAGE_KEY = "code-terra:terrain-layout:v1";
 const SPRITE_ZOOM_STEP = 5;
 const MAX_MOUNTAIN_SPRITES = 320;
@@ -78,18 +79,106 @@ function terrainLabelY(repository: TerrainRepository, py: number) {
   return clamp(py - (repository.py - repository.labelY), 0.05, 0.95);
 }
 
-function createTerrainArrangement(repositories: TerrainRepository[]) {
+function terrainArrangementGrowth(repository: TerrainRepository, year: number) {
+  return Math.min(1, 0.48 + (year - repository.created) * 0.13);
+}
+
+function terrainArrangementRadius(repository: TerrainRepository, year: number) {
+  const growth = terrainArrangementGrowth(repository, year);
+  return clamp(0.035 + repository.spread * growth * 0.04 + repository.relief * 0.018, 0.052, 0.112);
+}
+
+function layoutDistance(a: { px: number; py: number }, b: { px: number; py: number }) {
+  return Math.hypot(a.px - b.px, (a.py - b.py) * 1.16);
+}
+
+function createTerrainArrangement(repositories: TerrainRepository[], year: number) {
   const count = Math.max(1, repositories.length);
   const phase = randomTerrainPhase();
+  const placed: Array<TerrainPosition & { id: string; radius: number }> = [];
+  const sortedRepositories = [...repositories].sort((a, b) => {
+    const radiusDifference = terrainArrangementRadius(b, year) - terrainArrangementRadius(a, year);
+    return radiusDifference || b.lines - a.lines || a.seed - b.seed;
+  });
+  const candidateCount = Math.max(220, count * 18);
+  const spacingFactor = clamp(1.42 - count * 0.006, 1.04, 1.32);
 
-  return Object.fromEntries(repositories.map((repository, index) => {
-    const drift = seededNoise(repository.seed, index, Math.round(phase * 1000)) * 0.26;
-    const angle = phase + index * 2.399963 + drift;
-    const radial = 0.09 + 0.38 * Math.sqrt((index + 1) / count);
+  sortedRepositories.forEach((repository, repositoryIndex) => {
+    const radius = terrainArrangementRadius(repository, year);
+    const edgeX = clamp(0.06 + radius * 0.56, 0.07, 0.16);
+    const edgeY = clamp(0.1 + radius * 0.52, 0.11, 0.18);
+    let bestPosition = { px: 0.5, py: 0.5 };
+    let bestScore = Number.NEGATIVE_INFINITY;
 
-    const px = clamp(0.5 + Math.cos(angle) * radial, 0.1, 0.9);
-    const py = clamp(0.51 + Math.sin(angle) * radial * 0.72, 0.14, 0.86);
-    return [repository.id, { px, py, labelY: terrainLabelY(repository, py) }];
+    for (let candidateIndex = 0; candidateIndex < candidateCount; candidateIndex += 1) {
+      const candidatePhase = phase + repository.seed * 0.013 + candidateIndex * 2.399963;
+      const ringProgress = ((candidateIndex * 0.61803398875 + repositoryIndex * 0.173) % 1);
+      const radial = Math.sqrt(ringProgress);
+      const wobble = seededNoise(repository.seed, candidateIndex, repositoryIndex) * 0.026;
+      const px = clamp(0.5 + Math.cos(candidatePhase) * radial * 0.47 + wobble, edgeX, 1 - edgeX);
+      const py = clamp(0.51 + Math.sin(candidatePhase) * radial * 0.36 + wobble * 0.7, edgeY, 1 - edgeY);
+      const centerBias = Math.hypot(px - 0.5, (py - 0.51) * 1.28) * 0.045;
+      const spacingScore = placed.length
+        ? Math.min(...placed.map((position) => {
+          const desired = (radius + position.radius) * spacingFactor + 0.035;
+          return layoutDistance({ px, py }, position) - desired;
+        }))
+        : 1;
+      const score = spacingScore - centerBias + seededNoise(repository.seed, candidateIndex, 19) * 0.002;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestPosition = { px, py };
+      }
+    }
+
+    placed.push({
+      id: repository.id,
+      radius,
+      px: bestPosition.px,
+      py: bestPosition.py,
+      labelY: terrainLabelY(repository, bestPosition.py),
+    });
+  });
+
+  for (let iteration = 0; iteration < 90; iteration += 1) {
+    for (let index = 0; index < placed.length; index += 1) {
+      for (let nextIndex = index + 1; nextIndex < placed.length; nextIndex += 1) {
+        const current = placed[index];
+        const next = placed[nextIndex];
+        const desired = (current.radius + next.radius) * spacingFactor + 0.03;
+        const dx = next.px - current.px;
+        const dy = (next.py - current.py) * 1.16;
+        const distance = Math.max(0.0001, Math.hypot(dx, dy));
+        if (distance >= desired) continue;
+        const push = (desired - distance) * 0.018;
+        const pushX = (dx / distance) * push;
+        const pushY = ((dy / distance) * push) / 1.16;
+        current.px -= pushX;
+        current.py -= pushY;
+        next.px += pushX;
+        next.py += pushY;
+      }
+    }
+
+    placed.forEach((position) => {
+      const edgeX = clamp(0.06 + position.radius * 0.56, 0.07, 0.16);
+      const edgeY = clamp(0.1 + position.radius * 0.52, 0.11, 0.18);
+      position.px = clamp(position.px, edgeX, 1 - edgeX);
+      position.py = clamp(position.py, edgeY, 1 - edgeY);
+    });
+  }
+
+  return Object.fromEntries(placed.map((position) => {
+    const repository = repositories.find((item) => item.id === position.id);
+    return [
+      position.id,
+      {
+        px: position.px,
+        py: position.py,
+        labelY: repository ? terrainLabelY(repository, position.py) : position.labelY,
+      },
+    ];
   }));
 }
 
@@ -487,14 +576,18 @@ export default function TerrainCanvas({
   const dragRef = useRef<DragState | null>(null);
   const renderedPanRef = useRef<Point>({ x: 0, y: 0 });
   const skipTransitionRef = useRef(false);
+  const walkReturnViewRef = useRef<{ pan: Point; zoom: number } | null>(null);
   const [size, setSize] = useState<Size>({ width: 900, height: 642 });
   const [pan, setPan] = useState<Point>({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const [isNavigating, setIsNavigating] = useState(false);
   const [isArranging, setIsArranging] = useState(false);
+  const [isWalkTransitioning, setIsWalkTransitioning] = useState(false);
+  const [atlasTransitionLabel, setAtlasTransitionLabel] = useState<string | null>(null);
   const [atlasMode, setAtlasMode] = useState<AtlasMode>("terra");
   const [armedRepositoryId, setArmedRepositoryId] = useState<string | null>(null);
   const [detailsRepositoryId, setDetailsRepositoryId] = useState<string | null>(null);
+  const [lastWalkPosition, setLastWalkPosition] = useState<WalkModePosition | null>(null);
   const [positionOverrides, setPositionOverrides] = useState<TerrainLayout>({});
   const positionOverridesRef = useRef<TerrainLayout>({});
   const interactionPanRef = useRef<Point>(pan);
@@ -602,6 +695,14 @@ export default function TerrainCanvas({
       geometry: terrainGeometry(repository, size, zoom, year, pan),
     };
   }, [availableRepositories, language, pan, selectedId, size, year, zoom]);
+  const lastWalkMarker = useMemo(() => {
+    if (!lastWalkPosition) return null;
+    const scale = zoom / 100;
+    return {
+      x: size.width / 2 + (lastWalkPosition.px * size.width - size.width / 2) * scale + pan.x,
+      y: size.height / 2 + (lastWalkPosition.py * size.height - size.height / 2) * scale + pan.y,
+    };
+  }, [lastWalkPosition, pan, size, zoom]);
   const detailsRepository = useMemo(
     () => repositories.find((repository) => repository.id === detailsRepositoryId) ?? null,
     [detailsRepositoryId, repositories],
@@ -740,6 +841,23 @@ export default function TerrainCanvas({
     if (panFrameRef.current !== null) cancelAnimationFrame(panFrameRef.current);
   }, []);
 
+  const renderTerrainFrame = useCallback((framePan: Point, frameZoom: number) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const pixelWidth = Math.round(size.width * dpr);
+    const pixelHeight = Math.round(size.height * dpr);
+    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    context.clearRect(0, 0, size.width, size.height);
+    drawTerrainScene(context, availableRepositories, selectedId, size, frameZoom, year, language, framePan, dpr);
+    renderedPanRef.current = framePan;
+  }, [availableRepositories, language, selectedId, size, year]);
+
   const navigateToRepository = useCallback((repository: TerrainRepository) => {
     if (!isImmersive) return;
     const geometry = terrainGeometry(repository, size, zoom, year, pan);
@@ -793,13 +911,168 @@ export default function TerrainCanvas({
     onToggleMapKey();
   }, [onToggleMapKey]);
 
-  const switchAtlasMode = useCallback((mode: AtlasMode) => {
+  const handleWalkPositionChange = useCallback((position: WalkModePosition) => {
+    setLastWalkPosition((current) => {
+      if (current && Math.hypot(current.px - position.px, current.py - position.py) < 0.001) return current;
+      return position;
+    });
+  }, []);
+
+  const transitionIntoWalkMode = useCallback(() => {
+    if (panFrameRef.current !== null) cancelAnimationFrame(panFrameRef.current);
+    panFrameRef.current = null;
+    if (animationFrameRef.current !== null) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+
+    const selectedRepository = availableRepositories.find((repository) => repository.id === selectedId) ?? availableRepositories[0];
+    const targetPoint = lastWalkPosition ?? (selectedRepository
+      ? { px: selectedRepository.px, py: selectedRepository.py }
+      : { px: 0.5, py: 0.5 });
+    const targetZoom = WALK_ENTRY_ZOOM;
+    const targetScale = targetZoom / 100;
+    const targetPan = clampPan({
+      x: size.width * 0.5 - (size.width / 2 + (targetPoint.px * size.width - size.width / 2) * targetScale),
+      y: size.height * 0.58 - (size.height / 2 + (targetPoint.py * size.height - size.height / 2) * targetScale),
+    });
+    const startPan = interactionPanRef.current;
+    const startZoom = interactionZoomRef.current;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    walkReturnViewRef.current = { pan: startPan, zoom: startZoom };
+
+    setAtlasMode("terra");
     setIsArranging(false);
     setArmedRepositoryId(null);
     setDetailsRepositoryId(null);
     onCloseMapKey();
+
+    if (reducedMotion) {
+      setPan(targetPan);
+      onZoomChange(targetZoom);
+      setAtlasMode("walk");
+      return;
+    }
+
+    const startedAt = performance.now();
+    const duration = 1360;
+    setIsNavigating(true);
+    setIsWalkTransitioning(true);
+    setAtlasTransitionLabel("Zooming into terrain");
+    renderTerrainFrame(startPan, startZoom);
+
+    const transitionFrame = (timestamp: number) => {
+      const progress = Math.min(1, (timestamp - startedAt) / duration);
+      const eased = progress < 0.5
+        ? 4 * progress * progress * progress
+        : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+      const nextZoom = startZoom + (targetZoom - startZoom) * eased;
+      renderTerrainFrame({
+        x: startPan.x + (targetPan.x - startPan.x) * eased,
+        y: startPan.y + (targetPan.y - startPan.y) * eased,
+      }, nextZoom);
+
+      if (progress < 1) {
+        panFrameRef.current = requestAnimationFrame(transitionFrame);
+      } else {
+        panFrameRef.current = null;
+        skipTransitionRef.current = true;
+        setPan(targetPan);
+        onZoomChange(targetZoom);
+        setIsNavigating(false);
+        setAtlasMode("walk");
+        window.setTimeout(() => {
+          setIsWalkTransitioning(false);
+          setAtlasTransitionLabel(null);
+        }, 420);
+      }
+    };
+
+    panFrameRef.current = requestAnimationFrame(transitionFrame);
+  }, [availableRepositories, clampPan, lastWalkPosition, onCloseMapKey, onZoomChange, renderTerrainFrame, selectedId, size]);
+
+  const transitionBackToTerraView = useCallback(() => {
+    if (panFrameRef.current !== null) cancelAnimationFrame(panFrameRef.current);
+    panFrameRef.current = null;
+    if (animationFrameRef.current !== null) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+
+    const startPan = interactionPanRef.current;
+    const startZoom = interactionZoomRef.current;
+    const targetView = walkReturnViewRef.current ?? { pan: { x: 0, y: 0 }, zoom: 100 };
+    const targetPan = targetView.pan;
+    const targetZoom = targetView.zoom;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    setAtlasMode("terra");
+    setIsArranging(false);
+    setArmedRepositoryId(null);
+    setDetailsRepositoryId(null);
+    onCloseMapKey();
+
+    if (reducedMotion) {
+      skipTransitionRef.current = true;
+      setPan(targetPan);
+      onZoomChange(targetZoom);
+      return;
+    }
+
+    const startedAt = performance.now();
+    const duration = 1120;
+    setIsNavigating(true);
+    setIsWalkTransitioning(true);
+    setAtlasTransitionLabel("Returning to Terra View");
+    renderTerrainFrame(startPan, startZoom);
+
+    const transitionFrame = (timestamp: number) => {
+      const progress = Math.min(1, (timestamp - startedAt) / duration);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const nextZoom = startZoom + (targetZoom - startZoom) * eased;
+      renderTerrainFrame({
+        x: startPan.x + (targetPan.x - startPan.x) * eased,
+        y: startPan.y + (targetPan.y - startPan.y) * eased,
+      }, nextZoom);
+
+      if (progress < 1) {
+        panFrameRef.current = requestAnimationFrame(transitionFrame);
+      } else {
+        panFrameRef.current = null;
+        skipTransitionRef.current = true;
+        setPan(targetPan);
+        onZoomChange(targetZoom);
+        setIsNavigating(false);
+        setIsWalkTransitioning(false);
+        setAtlasTransitionLabel(null);
+      }
+    };
+
+    panFrameRef.current = requestAnimationFrame(transitionFrame);
+  }, [onCloseMapKey, onZoomChange, renderTerrainFrame]);
+
+  const switchAtlasMode = useCallback((mode: AtlasMode) => {
+    if (panFrameRef.current !== null) {
+      cancelAnimationFrame(panFrameRef.current);
+      panFrameRef.current = null;
+    }
+    setIsNavigating(false);
+    setIsWalkTransitioning(false);
+    setAtlasTransitionLabel(null);
+    setIsArranging(false);
+    setArmedRepositoryId(null);
+    setDetailsRepositoryId(null);
+    onCloseMapKey();
+    if (mode === "terra" && atlasMode === "walk") {
+      transitionBackToTerraView();
+      return;
+    }
+    if (mode === "walk" && atlasMode !== "walk") {
+      transitionIntoWalkMode();
+      return;
+    }
     setAtlasMode(mode);
-  }, [onCloseMapKey]);
+  }, [atlasMode, onCloseMapKey, transitionBackToTerraView, transitionIntoWalkMode]);
 
   const terrainAtPoint = useCallback(
     (point: Point) => {
@@ -839,11 +1112,11 @@ export default function TerrainCanvas({
       return;
     }
 
-    const nextLayout = createTerrainArrangement(repositories);
+    const nextLayout = createTerrainArrangement(repositories, year);
     positionOverridesRef.current = nextLayout;
     setPositionOverrides(nextLayout);
     persistTerrainLayout();
-  }, [hasCustomTerrainLayout, persistTerrainLayout, repositories]);
+  }, [hasCustomTerrainLayout, persistTerrainLayout, repositories, year]);
 
   const toggleArrangeMode = useCallback(() => {
     setDetailsRepositoryId(null);
@@ -1003,7 +1276,7 @@ export default function TerrainCanvas({
   }, [atlasMode, clampPan, isImmersive, onZoomChange, resetView, zoom]);
 
   return (
-    <div className={`terrain-stage${isDragging ? " is-dragging" : ""}${isNavigating ? " is-navigating" : ""}${isArranging ? " is-arranging" : ""}${isImmersive ? " is-immersive" : ""}${isImmersive && atlasMode === "timeline" ? " is-timeline" : ""}${isImmersive && atlasMode === "walk" ? " is-walk" : ""}`} ref={wrapperRef}>
+    <div className={`terrain-stage${isDragging ? " is-dragging" : ""}${isNavigating ? " is-navigating" : ""}${isArranging ? " is-arranging" : ""}${isWalkTransitioning ? " is-walk-transitioning" : ""}${isImmersive ? " is-immersive" : ""}${isImmersive && atlasMode === "timeline" ? " is-timeline" : ""}${isImmersive && atlasMode === "walk" ? " is-walk" : ""}`} ref={wrapperRef}>
       <canvas
         ref={canvasRef}
         className="terrain-canvas"
@@ -1046,7 +1319,7 @@ export default function TerrainCanvas({
             <strong>{timelineRepositories.length} REPOSITORIES IN VIEW</strong>
           </div>
           <nav aria-label="Atlas navigation and controls">
-            <button type="button" className={`atlas-mode-toggle is-terra${atlasMode === "terra" ? " active" : ""}`} onClick={() => switchAtlasMode("terra")} aria-pressed={atlasMode === "terra"}>
+            <button type="button" className={`atlas-mode-toggle is-terra${atlasMode === "terra" || atlasTransitionLabel === "Returning to Terra View" ? " active" : ""}`} onClick={() => switchAtlasMode("terra")} aria-pressed={atlasMode === "terra" || atlasTransitionLabel === "Returning to Terra View"}>
               <i aria-hidden="true"/>
               Terra View
             </button>
@@ -1054,9 +1327,9 @@ export default function TerrainCanvas({
               <i aria-hidden="true"/>
               Timeline View
             </button>
-            <button type="button" className={`atlas-mode-toggle is-walk${atlasMode === "walk" ? " active" : ""}`} onClick={() => switchAtlasMode("walk")} aria-pressed={atlasMode === "walk"}>
+            <button type="button" className={`atlas-mode-toggle is-walk${atlasMode === "walk" || atlasTransitionLabel === "Zooming into terrain" ? " active" : ""}`} onClick={() => switchAtlasMode("walk")} aria-pressed={atlasMode === "walk" || atlasTransitionLabel === "Zooming into terrain"}>
               <i aria-hidden="true"/>
-              Walk Mode
+              {atlasTransitionLabel === "Zooming into terrain" ? "Entering Walk" : "Walk Mode"}
             </button>
             {atlasMode === "terra" && (
               <button
@@ -1154,8 +1427,38 @@ export default function TerrainCanvas({
         </section>
       )}
 
+      {isWalkTransitioning && (
+        <div className="walk-transition-vignette" aria-hidden="true">
+          <span>{atlasTransitionLabel ?? "Crossing terrain"}</span>
+        </div>
+      )}
+
       {isImmersive && atlasMode === "walk" && (
-        <WalkModeScene repositories={availableRepositories} selectedId={selectedId} year={year} language={language} onSelect={onSelect} />
+        <WalkModeScene
+          repositories={availableRepositories}
+          selectedId={selectedId}
+          year={year}
+          language={language}
+          onSelect={onSelect}
+          onPositionChange={handleWalkPositionChange}
+          initialPosition={lastWalkPosition}
+        />
+      )}
+
+      {atlasMode === "terra" && lastWalkMarker && (
+        <div
+          className="walk-position-ping"
+          aria-label="Last Walk Mode position"
+          style={{
+            left: `${lastWalkMarker.x}px`,
+            top: `${lastWalkMarker.y}px`,
+          }}
+        >
+          <span className="walk-position-ping-ring"/>
+          <span className="walk-position-ping-ring is-delayed"/>
+          <span className="walk-position-ping-core"/>
+          <small>Last walk</small>
+        </div>
       )}
 
       {atlasMode === "terra" && selectedTerrain && (

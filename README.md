@@ -21,7 +21,19 @@ Code Terra gives familiar repository signals a visual form:
 
 Estimated lines of code are derived from the language-byte totals reported by GitHub, so they are intended as a visual comparison rather than an exact source-line count.
 
-## Features
+## Featured Development Image
+
+### Phase 1 
+
+<p align="center"><strong>Terra View</strong></p>
+<h1 align="center">
+  <img src="./public/first-terraview.png" alt="first-terra view" width="720">
+</h1>
+
+<p align="center"><strong>Walk Mode</strong></p>
+<h1 align="center">
+  <img src="./public/first-walk.png" alt="first-terra view" width="720">
+</h1>
 
 ### Interactive terrain atlas
 

@@ -10,15 +10,25 @@ type WalkModeSceneProps = {
   year: number;
   language: LanguageFilter;
   onSelect: (id: string) => void;
+  onPositionChange?: (position: WalkModePosition) => void;
+  initialPosition?: WalkModePosition | null;
 };
 
 type WalkKey = "forward" | "backward" | "left" | "right" | "run";
+export type WalkModePosition = { px: number; py: number };
 
-const POSITION_WORLD_SIZE = 1750;
-const TERRAIN_WORLD_SIZE = 620;
-const EYE_HEIGHT = 5.8;
+const POSITION_WORLD_SIZE = 2900;
+const TERRAIN_WORLD_SIZE = 960;
+const EYE_HEIGHT = 15.5;
 const MAX_PITCH = Math.PI * 0.42;
 const GROUND_SIZE = POSITION_WORLD_SIZE * 1.56;
+const POSITION_REPORT_INTERVAL = 120;
+const GRASS_BLADE_COUNT = 2_000_000;
+const GRASS_FIELD_SIZE = GROUND_SIZE * 0.9;
+const WALK_BODY_RADIUS = 18;
+
+type GrassFieldMesh = THREE.Mesh<THREE.InstancedBufferGeometry, THREE.ShaderMaterial>;
+let grassFieldCache: { key: string; mesh: GrassFieldMesh } | null = null;
 
 type WalkTerrainGeometry = {
   x: number;
@@ -28,6 +38,10 @@ type WalkTerrainGeometry = {
   height: number;
   growth: number;
 };
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
 
 function seededTerrainNoise(seed: number, segment: number, ring: number) {
   const value = Math.sin(seed * 81.71 + segment * 19.91 + ring * 47.13) * 43758.5453;
@@ -41,8 +55,8 @@ function terraGrowth(repository: TerrainRepository, year: number) {
 function terraWalkGeometry(repository: TerrainRepository, year: number) {
   const growth = terraGrowth(repository, year);
   const radiusX = TERRAIN_WORLD_SIZE * 0.24 * repository.spread * growth;
-  const radiusZ = radiusX * 0.86;
-  const height = TERRAIN_WORLD_SIZE * (0.14 + 0.3 * repository.relief * growth);
+  const radiusZ = radiusX * 1.08;
+  const height = TERRAIN_WORLD_SIZE * (0.12 + 0.26 * repository.relief * growth);
 
   return {
     x: (repository.px - 0.5) * POSITION_WORLD_SIZE,
@@ -52,6 +66,32 @@ function terraWalkGeometry(repository: TerrainRepository, year: number) {
     height,
     growth,
   };
+}
+
+function walkWorldToAtlasPosition(x: number, z: number): WalkModePosition {
+  return {
+    px: clamp(x / POSITION_WORLD_SIZE + 0.5, 0, 1),
+    py: clamp(z / POSITION_WORLD_SIZE + 0.5, 0, 1),
+  };
+}
+
+function atlasPositionToWalkWorld(position: WalkModePosition) {
+  return {
+    x: (position.px - 0.5) * POSITION_WORLD_SIZE,
+    z: (position.py - 0.5) * POSITION_WORLD_SIZE,
+  };
+}
+
+function groundHeightAt(x: number, z: number) {
+  const groundY = -z;
+  return Math.sin(x * 0.035) * 0.42
+    + Math.cos(groundY * 0.028) * 0.36
+    + Math.sin((x + groundY) * 0.018) * 0.2;
+}
+
+function nextGrassRandom(state: { value: number }) {
+  state.value = (Math.imul(1664525, state.value) + 1013904223) >>> 0;
+  return state.value / 0xffffffff;
 }
 
 function createGroundGeometry() {
@@ -77,8 +117,8 @@ function createMountainMeshGeometry(repository: TerrainRepository, geometry: Wal
 
   for (let ring = 0; ring <= rings; ring += 1) {
     const fraction = ring / rings;
-    const radiusFraction = ring === 0 ? 0.08 : Math.pow(fraction, 0.66);
-    const elevation = geometry.height * Math.pow(1 - Math.pow(fraction, 1.34), 1.06);
+    const radiusFraction = ring === 0 ? 0.1 : Math.pow(fraction, 0.58);
+    const elevation = geometry.height * Math.pow(1 - Math.pow(fraction, 1.22), 0.94);
     const roughness = 0.008 + fraction * 0.028;
 
     for (let segment = 0; segment < segments; segment += 1) {
@@ -108,6 +148,264 @@ function createMountainMeshGeometry(repository: TerrainRepository, geometry: Wal
   return meshGeometry;
 }
 
+function resolveTerrainCollision(
+  x: number,
+  z: number,
+  mountainEntries: Array<WalkTerrainGeometry & { repository: TerrainRepository }>,
+) {
+  let nextX = x;
+  let nextZ = z;
+
+  for (let pass = 0; pass < 4; pass += 1) {
+    mountainEntries.forEach((entry) => {
+      const radiusX = Math.max(1, entry.radiusX * 0.98 + WALK_BODY_RADIUS);
+      const radiusZ = Math.max(1, entry.radiusZ * 0.98 + WALK_BODY_RADIUS);
+      const dx = nextX - entry.x;
+      const dz = nextZ - entry.z;
+      const normalizedDistance = (dx * dx) / (radiusX * radiusX) + (dz * dz) / (radiusZ * radiusZ);
+      if (normalizedDistance >= 1) return;
+
+      const angle = Math.atan2(dz / radiusZ || 0.001, dx / radiusX || 0.001);
+      nextX = entry.x + Math.cos(angle) * radiusX;
+      nextZ = entry.z + Math.sin(angle) * radiusZ;
+    });
+  }
+
+  return { x: nextX, z: nextZ };
+}
+
+function isInsideTerrainCollision(
+  x: number,
+  z: number,
+  mountainEntries: Array<WalkTerrainGeometry & { repository: TerrainRepository }>,
+) {
+  return mountainEntries.some((entry) => {
+    const radiusX = Math.max(1, entry.radiusX * 0.98 + WALK_BODY_RADIUS);
+    const radiusZ = Math.max(1, entry.radiusZ * 0.98 + WALK_BODY_RADIUS);
+    const dx = x - entry.x;
+    const dz = z - entry.z;
+    return (dx * dx) / (radiusX * radiusX) + (dz * dz) / (radiusZ * radiusZ) < 1;
+  });
+}
+
+function resolveWalkMovement(
+  currentX: number,
+  currentZ: number,
+  attemptedX: number,
+  attemptedZ: number,
+  mountainEntries: Array<WalkTerrainGeometry & { repository: TerrainRepository }>,
+) {
+  if (!isInsideTerrainCollision(attemptedX, attemptedZ, mountainEntries)) {
+    return { x: attemptedX, z: attemptedZ };
+  }
+
+  if (!isInsideTerrainCollision(attemptedX, currentZ, mountainEntries)) {
+    return { x: attemptedX, z: currentZ };
+  }
+
+  if (!isInsideTerrainCollision(currentX, attemptedZ, mountainEntries)) {
+    return { x: currentX, z: attemptedZ };
+  }
+
+  return { x: currentX, z: currentZ };
+}
+
+function createGrassClearingCells(mountainEntries: Array<WalkTerrainGeometry & { repository: TerrainRepository }>) {
+  const cellSize = TERRAIN_WORLD_SIZE * 0.52;
+  const cells = new Map<string, Array<WalkTerrainGeometry & { repository: TerrainRepository }>>();
+  mountainEntries.forEach((entry) => {
+    const radiusX = entry.radiusX * 1.1;
+    const radiusZ = entry.radiusZ * 1.12;
+    const minCellX = Math.floor((entry.x - radiusX) / cellSize);
+    const maxCellX = Math.floor((entry.x + radiusX) / cellSize);
+    const minCellZ = Math.floor((entry.z - radiusZ) / cellSize);
+    const maxCellZ = Math.floor((entry.z + radiusZ) / cellSize);
+
+    for (let cellX = minCellX; cellX <= maxCellX; cellX += 1) {
+      for (let cellZ = minCellZ; cellZ <= maxCellZ; cellZ += 1) {
+        const key = `${cellX}:${cellZ}`;
+        const cell = cells.get(key);
+        if (cell) cell.push(entry);
+        else cells.set(key, [entry]);
+      }
+    }
+  });
+
+  return { cells, cellSize };
+}
+
+function moveOutOfMountainClearings(
+  x: number,
+  z: number,
+  clearingCells: ReturnType<typeof createGrassClearingCells>,
+  random: number,
+) {
+  const cellX = Math.floor(x / clearingCells.cellSize);
+  const cellZ = Math.floor(z / clearingCells.cellSize);
+  let nextX = x;
+  let nextZ = z;
+
+  for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+    for (let offsetZ = -1; offsetZ <= 1; offsetZ += 1) {
+      const cell = clearingCells.cells.get(`${cellX + offsetX}:${cellZ + offsetZ}`);
+      if (!cell) continue;
+      cell.forEach((entry) => {
+        const radiusX = entry.radiusX * 1.1;
+        const radiusZ = entry.radiusZ * 1.12;
+        const dx = (nextX - entry.x) / Math.max(1, radiusX);
+        const dz = (nextZ - entry.z) / Math.max(1, radiusZ);
+        if (dx * dx + dz * dz >= 1) return;
+        const angle = Math.atan2(dz || random - 0.5, dx || random - 0.5);
+        const margin = 1.02 + random * 0.18;
+        nextX = entry.x + Math.cos(angle) * radiusX * margin;
+        nextZ = entry.z + Math.sin(angle) * radiusZ * margin;
+      });
+    }
+  }
+
+  const fieldLimit = GRASS_FIELD_SIZE * 0.5;
+  return {
+    x: clamp(nextX, -fieldLimit, fieldLimit),
+    z: clamp(nextZ, -fieldLimit, fieldLimit),
+  };
+}
+
+function grassFieldCacheKey(mountainEntries: Array<WalkTerrainGeometry & { repository: TerrainRepository }>) {
+  const terrainSignature = [...mountainEntries]
+    .sort((a, b) => a.repository.id.localeCompare(b.repository.id))
+    .map((entry) => [
+      entry.repository.id,
+      entry.x.toFixed(1),
+      entry.z.toFixed(1),
+      entry.radiusX.toFixed(1),
+      entry.radiusZ.toFixed(1),
+    ].join(":"))
+    .join("|");
+
+  return `${GRASS_BLADE_COUNT}:${GRASS_FIELD_SIZE.toFixed(1)}:${terrainSignature}`;
+}
+
+function createGrassField(mountainEntries: Array<WalkTerrainGeometry & { repository: TerrainRepository }>) {
+  const cacheKey = grassFieldCacheKey(mountainEntries);
+  if (grassFieldCache?.key === cacheKey) {
+    grassFieldCache.mesh.parent?.remove(grassFieldCache.mesh);
+    return grassFieldCache.mesh;
+  }
+
+  if (grassFieldCache) {
+    grassFieldCache.mesh.parent?.remove(grassFieldCache.mesh);
+    grassFieldCache.mesh.geometry.dispose();
+    grassFieldCache.mesh.material.dispose();
+    grassFieldCache = null;
+  }
+
+  const geometry = new THREE.InstancedBufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute([
+    -0.5, 0, 0,
+    0.5, 0, 0,
+    0, 1, 0.16,
+  ], 3));
+
+  const offsets = new Float32Array(GRASS_BLADE_COUNT * 3);
+  const scales = new Float32Array(GRASS_BLADE_COUNT * 2);
+  const rotations = new Float32Array(GRASS_BLADE_COUNT);
+  const shades = new Float32Array(GRASS_BLADE_COUNT);
+  const randomState = { value: 0x6d2b79f5 };
+  const clearingCells = createGrassClearingCells(mountainEntries);
+
+  for (let index = 0; index < GRASS_BLADE_COUNT; index += 1) {
+    const rawX = (nextGrassRandom(randomState) - 0.5) * GRASS_FIELD_SIZE;
+    const rawZ = (nextGrassRandom(randomState) - 0.5) * GRASS_FIELD_SIZE;
+    const clearingRandom = nextGrassRandom(randomState);
+    const { x, z } = moveOutOfMountainClearings(rawX, rawZ, clearingCells, clearingRandom);
+    const height = 2.2 + nextGrassRandom(randomState) * 8.2;
+    const width = 0.55 + nextGrassRandom(randomState) * 1.6;
+
+    offsets[index * 3] = x;
+    offsets[index * 3 + 1] = groundHeightAt(x, z) + 0.08;
+    offsets[index * 3 + 2] = z;
+    scales[index * 2] = width;
+    scales[index * 2 + 1] = height;
+    rotations[index] = nextGrassRandom(randomState) * Math.PI * 2;
+    shades[index] = nextGrassRandom(randomState);
+  }
+
+  geometry.setAttribute("instanceOffset", new THREE.InstancedBufferAttribute(offsets, 3));
+  geometry.setAttribute("instanceScale", new THREE.InstancedBufferAttribute(scales, 2));
+  geometry.setAttribute("instanceRotation", new THREE.InstancedBufferAttribute(rotations, 1));
+  geometry.setAttribute("instanceShade", new THREE.InstancedBufferAttribute(shades, 1));
+  geometry.instanceCount = GRASS_BLADE_COUNT;
+
+  const material = new THREE.ShaderMaterial({
+    uniforms: THREE.UniformsUtils.merge([
+      THREE.UniformsLib.fog,
+      {
+        uTime: { value: 0 },
+        uRootColor: { value: new THREE.Color("#1a3317") },
+        uTipColor: { value: new THREE.Color("#a6bf62") },
+      },
+    ]),
+    vertexShader: `
+      attribute vec3 instanceOffset;
+      attribute vec2 instanceScale;
+      attribute float instanceRotation;
+      attribute float instanceShade;
+      varying float vBladeHeight;
+      varying float vShade;
+      uniform float uTime;
+      #include <fog_pars_vertex>
+
+      void main() {
+        vec3 transformed = position;
+        float progress = transformed.y;
+        transformed.x *= instanceScale.x;
+        transformed.y *= instanceScale.y;
+        transformed.z *= instanceScale.x;
+
+        float wind = sin(uTime * 0.9 + instanceOffset.x * 0.017 + instanceOffset.z * 0.013 + instanceShade * 6.28318);
+        transformed.x += wind * progress * progress * instanceScale.x * 0.42;
+        transformed.z += cos(uTime * 0.72 + instanceOffset.z * 0.015) * progress * progress * instanceScale.x * 0.18;
+
+        float s = sin(instanceRotation);
+        float c = cos(instanceRotation);
+        vec3 rotated = vec3(
+          transformed.x * c - transformed.z * s,
+          transformed.y,
+          transformed.x * s + transformed.z * c
+        );
+
+        vBladeHeight = progress;
+        vShade = instanceShade;
+        vec4 mvPosition = modelViewMatrix * vec4(rotated + instanceOffset, 1.0);
+        gl_Position = projectionMatrix * mvPosition;
+        #include <fog_vertex>
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 uRootColor;
+      uniform vec3 uTipColor;
+      varying float vBladeHeight;
+      varying float vShade;
+      #include <fog_pars_fragment>
+
+      void main() {
+        vec3 grassColor = mix(uRootColor, uTipColor, smoothstep(0.08, 1.0, vBladeHeight));
+        grassColor *= 0.72 + vShade * 0.42;
+        gl_FragColor = vec4(grassColor, 1.0);
+        #include <fog_fragment>
+      }
+    `,
+    side: THREE.DoubleSide,
+    fog: true,
+  });
+
+  const grass = new THREE.Mesh<THREE.InstancedBufferGeometry, THREE.ShaderMaterial>(geometry, material);
+  grass.userData.preserveAcrossWalkMode = true;
+  grass.frustumCulled = false;
+  grassFieldCache = { key: cacheKey, mesh: grass };
+  return grass;
+}
+
 function movementKey(key: string): WalkKey | null {
   if (key === "w" || key === "arrowup") return "forward";
   if (key === "s" || key === "arrowdown") return "backward";
@@ -119,6 +417,7 @@ function movementKey(key: string): WalkKey | null {
 
 function disposeObject(object: THREE.Object3D) {
   object.traverse((child) => {
+    if (child.userData.preserveAcrossWalkMode) return;
     const mesh = child as THREE.Mesh;
     mesh.geometry?.dispose();
     const material = mesh.material;
@@ -127,16 +426,23 @@ function disposeObject(object: THREE.Object3D) {
   });
 }
 
-export default function WalkModeScene({ repositories, selectedId, year, language, onSelect }: WalkModeSceneProps) {
+export default function WalkModeScene({ repositories, selectedId, year, language, onSelect, onPositionChange, initialPosition }: WalkModeSceneProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const onSelectRef = useRef(onSelect);
+  const onPositionChangeRef = useRef(onPositionChange);
   const selectedIdRef = useRef(selectedId);
+  const initialPositionRef = useRef(initialPosition);
   const [pointerLocked, setPointerLocked] = useState(false);
+  const [sceneReady, setSceneReady] = useState(false);
   const [nearestRepository, setNearestRepository] = useState<TerrainRepository | null>(null);
 
   useEffect(() => {
     onSelectRef.current = onSelect;
   }, [onSelect]);
+
+  useEffect(() => {
+    onPositionChangeRef.current = onPositionChange;
+  }, [onPositionChange]);
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
@@ -145,13 +451,14 @@ export default function WalkModeScene({ repositories, selectedId, year, language
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
+    setSceneReady(false);
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color("#07110d");
-    scene.fog = new THREE.FogExp2("#07110d", 0.00135);
+    scene.fog = new THREE.FogExp2("#07110d", 0.00092);
 
-    const camera = new THREE.PerspectiveCamera(64, 1, 0.1, 2600);
-    camera.position.set(0, EYE_HEIGHT, 360);
+    const camera = new THREE.PerspectiveCamera(64, 1, 0.1, 4200);
+    camera.position.set(0, EYE_HEIGHT, 560);
     camera.rotation.order = "YXZ";
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
@@ -167,7 +474,7 @@ export default function WalkModeScene({ repositories, selectedId, year, language
     sun.position.set(-36, 52, 20);
     scene.add(sun);
 
-    const selectedLight = new THREE.PointLight("#d8f56a", 32, 130, 1.4);
+    const selectedLight = new THREE.PointLight("#d8f56a", 38, 190, 1.35);
     selectedLight.position.set(0, 10, 0);
     scene.add(selectedLight);
 
@@ -198,11 +505,11 @@ export default function WalkModeScene({ repositories, selectedId, year, language
     groundGlow.position.y = 0.04;
     scene.add(groundGlow);
 
-    const grid = new THREE.GridHelper(GROUND_SIZE * 0.92, 82, "#33513d", "#173023");
+    const grid = new THREE.GridHelper(GROUND_SIZE * 0.92, 108, "#33513d", "#173023");
     grid.position.y = 0.018;
     scene.add(grid);
 
-    const boundary = POSITION_WORLD_SIZE * 0.7;
+    const boundary = POSITION_WORLD_SIZE * 0.72;
     const mountainGroup = new THREE.Group();
     scene.add(mountainGroup);
 
@@ -266,27 +573,53 @@ export default function WalkModeScene({ repositories, selectedId, year, language
       return { repository, dimmed, ...geometry, mountain, contours, foothill, material, contourMaterial, foothillMaterial };
     });
 
+    const grassField = createGrassField(mountainEntries);
+    grassField.position.y = 0.04;
+    scene.add(grassField);
+
     let yaw = 0;
     let pitch = 0;
     const keys = new Set<WalkKey>();
     const clock = new THREE.Clock();
     let animationFrame = 0;
     let currentNearestId = "";
+    let lastPositionReport = 0;
+    let readyReported = false;
 
     const setCameraRotation = () => {
       camera.rotation.set(pitch, yaw, 0);
     };
 
     const selectedEntry = mountainEntries.find((entry) => entry.repository.id === selectedIdRef.current) ?? mountainEntries[0];
-    if (selectedEntry) {
+    const spawnPosition = initialPositionRef.current;
+    if (spawnPosition) {
+      const spawn = atlasPositionToWalkWorld(spawnPosition);
+      camera.position.set(
+        Math.max(-boundary, Math.min(boundary, spawn.x)),
+        EYE_HEIGHT,
+        Math.max(-boundary, Math.min(boundary, spawn.z)),
+      );
+      const safeStart = resolveTerrainCollision(camera.position.x, camera.position.z, mountainEntries);
+      camera.position.x = Math.max(-boundary, Math.min(boundary, safeStart.x));
+      camera.position.z = Math.max(-boundary, Math.min(boundary, safeStart.z));
+      yaw = 0;
+      pitch = -0.08;
+    } else if (selectedEntry) {
       camera.position.set(
         selectedEntry.x,
         EYE_HEIGHT,
-        Math.min(boundary, selectedEntry.z + selectedEntry.radiusZ + 165),
+        Math.min(boundary, selectedEntry.z + selectedEntry.radiusZ + 285),
       );
+      const safeStart = resolveTerrainCollision(camera.position.x, camera.position.z, mountainEntries);
+      camera.position.x = Math.max(-boundary, Math.min(boundary, safeStart.x));
+      camera.position.z = Math.max(-boundary, Math.min(boundary, safeStart.z));
       yaw = 0;
       pitch = -0.08;
     }
+
+    const reportWalkPosition = () => {
+      onPositionChangeRef.current?.(walkWorldToAtlasPosition(camera.position.x, camera.position.z));
+    };
 
     const syncSelectedVisuals = () => {
       mountainEntries.forEach((entry) => {
@@ -345,7 +678,9 @@ export default function WalkModeScene({ repositories, selectedId, year, language
 
     const animate = () => {
       const delta = Math.min(0.05, clock.getDelta());
-      const speed = (keys.has("run") ? 185 : 88) * delta;
+      const grassTime = grassField.material.uniforms.uTime;
+      if (grassTime) grassTime.value = clock.elapsedTime;
+      const speed = (keys.has("run") ? 290 : 138) * delta;
       let forward = 0;
       let strafe = 0;
       if (keys.has("forward")) forward += 1;
@@ -357,10 +692,30 @@ export default function WalkModeScene({ repositories, selectedId, year, language
         const length = Math.hypot(forward, strafe) || 1;
         forward /= length;
         strafe /= length;
-        camera.position.x += (-Math.sin(yaw) * forward + Math.cos(yaw) * strafe) * speed;
-        camera.position.z += (-Math.cos(yaw) * forward - Math.sin(yaw) * strafe) * speed;
-        camera.position.x = Math.max(-boundary, Math.min(boundary, camera.position.x));
-        camera.position.z = Math.max(-boundary, Math.min(boundary, camera.position.z));
+        const attemptedX = camera.position.x + (-Math.sin(yaw) * forward + Math.cos(yaw) * strafe) * speed;
+        const attemptedZ = camera.position.z + (-Math.cos(yaw) * forward - Math.sin(yaw) * strafe) * speed;
+        const clampedAttemptX = Math.max(-boundary, Math.min(boundary, attemptedX));
+        const clampedAttemptZ = Math.max(-boundary, Math.min(boundary, attemptedZ));
+        const resolvedPosition = resolveWalkMovement(
+          camera.position.x,
+          camera.position.z,
+          clampedAttemptX,
+          clampedAttemptZ,
+          mountainEntries,
+        );
+        const safePosition = resolveTerrainCollision(
+          Math.max(-boundary, Math.min(boundary, attemptedX)),
+          Math.max(-boundary, Math.min(boundary, attemptedZ)),
+          mountainEntries,
+        );
+        camera.position.x = Math.max(-boundary, Math.min(boundary, isInsideTerrainCollision(resolvedPosition.x, resolvedPosition.z, mountainEntries) ? safePosition.x : resolvedPosition.x));
+        camera.position.z = Math.max(-boundary, Math.min(boundary, isInsideTerrainCollision(resolvedPosition.x, resolvedPosition.z, mountainEntries) ? safePosition.z : resolvedPosition.z));
+      }
+
+      const now = performance.now();
+      if (now - lastPositionReport > POSITION_REPORT_INTERVAL) {
+        lastPositionReport = now;
+        reportWalkPosition();
       }
 
       let nearest = mountainEntries[0] ?? null;
@@ -383,10 +738,15 @@ export default function WalkModeScene({ repositories, selectedId, year, language
       }
 
       renderer.render(scene, camera);
+      if (!readyReported) {
+        readyReported = true;
+        setSceneReady(true);
+      }
       animationFrame = requestAnimationFrame(animate);
     };
 
     setCameraRotation();
+    reportWalkPosition();
     syncSelectedVisuals();
     animate();
 
@@ -399,6 +759,8 @@ export default function WalkModeScene({ repositories, selectedId, year, language
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
       if (document.pointerLockElement === renderer.domElement) document.exitPointerLock();
+      reportWalkPosition();
+      scene.remove(grassField);
       host.removeChild(renderer.domElement);
       disposeObject(scene);
       renderer.dispose();
@@ -408,6 +770,14 @@ export default function WalkModeScene({ repositories, selectedId, year, language
   return (
     <section className="walk-mode-scene" aria-label="First person terrain walk mode">
       <div ref={hostRef} className="walk-mode-canvas-host" />
+      {!sceneReady && (
+        <div className="walk-mode-loading" role="status" aria-live="polite">
+          <span className="walk-mode-loading-orbit" aria-hidden="true"/>
+          <p>Preparing Walk Mode</p>
+          <strong>Growing grass field</strong>
+          <small>Reusing cached terrain when available</small>
+        </div>
+      )}
       <span className="walk-reticle" aria-hidden="true" />
       <div className="walk-mode-hud">
         <p>WALK MODE / FIRST PERSON</p>
