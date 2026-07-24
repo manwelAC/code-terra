@@ -16,6 +16,19 @@ import {
 type IconName = "atlas" | "repo" | "timeline" | "search" | "refresh" | "export" | "lock" | "arrow" | "key";
 type AtlasStatus = "checking" | "disconnected" | "loading" | "ready" | "empty" | "error";
 
+const CODE_TERRA_STORAGE_PREFIX = "code-terra:";
+
+function clearCodeTerraStorage() {
+  for (const storage of [window.localStorage, window.sessionStorage]) {
+    const keys: string[] = [];
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (key?.startsWith(CODE_TERRA_STORAGE_PREFIX)) keys.push(key);
+    }
+    keys.forEach((key) => storage.removeItem(key));
+  }
+}
+
 function Icon({ name }: { name: IconName }) {
   const common = { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.7, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
   if (name === "atlas") return <svg {...common}><circle cx="12" cy="12" r="8"/><path d="M4.7 9.7c3.8 2.2 10.8 2.2 14.6 0M4.7 14.3c3.8-2.2 10.8-2.2 14.6 0M12 4c2.4 2.3 3.6 5 3.6 8s-1.2 5.7-3.6 8c-2.4-2.3-3.6-5-3.6-8S9.6 6.3 12 4Z"/></svg>;
@@ -41,6 +54,7 @@ export default function CodeTerraApp() {
   const [zoom, setZoom] = useState(100);
   const [mapKeyOpen, setMapKeyOpen] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [updatedNow, setUpdatedNow] = useState(false);
   const [toast, setToast] = useState("");
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -170,10 +184,10 @@ export default function CodeTerraApp() {
     setShowOnboarding(false);
   };
 
-  const showToast = (message: string) => {
+  const showToast = useCallback((message: string) => {
     setToast("");
     window.setTimeout(() => setToast(message), 20);
-  };
+  }, []);
 
   const handleRescan = () => {
     if (isScanning) return;
@@ -203,6 +217,36 @@ export default function CodeTerraApp() {
     URL.revokeObjectURL(url);
     showToast("Terrain data exported as JSON.");
   };
+
+  const handleLogout = useCallback(async () => {
+    if (isLoggingOut) return;
+    setIsLoggingOut(true);
+    try {
+      const response = await fetch("/api/github/disconnect", { method: "POST" });
+      if (!response.ok) throw new Error("Disconnect request failed");
+
+      clearCodeTerraStorage();
+      setRepositoryData([]);
+      setGitHubRepositoryTotal(0);
+      setSelectedId("");
+      setAtlasStatus("disconnected");
+      setYear(new Date().getFullYear());
+      setLanguage("All");
+      setZoom(100);
+      setMapKeyOpen(false);
+      setIsScanning(false);
+      setUpdatedNow(false);
+      setToast("");
+      setTerrainHomeActive(true);
+      setEntryResolved(true);
+      setShowOnboarding(true);
+      window.history.replaceState({}, "", window.location.pathname);
+    } catch {
+      showToast("Code Terra could not log out. Please try again.");
+    } finally {
+      setIsLoggingOut(false);
+    }
+  }, [isLoggingOut, showToast]);
 
   const selectFromIndex = (id: string) => {
     setSelectedId(id);
@@ -250,6 +294,8 @@ export default function CodeTerraApp() {
           onImmersiveChange={setTerrainHomeActive}
           onToggleMapKey={() => setMapKeyOpen((open) => !open)}
           onCloseMapKey={() => setMapKeyOpen(false)}
+          onLogout={handleLogout}
+          isLoggingOut={isLoggingOut}
         />
         {toast && <div className="toast" role="status" aria-live="polite"><i/>{toast}</div>}
       </div>

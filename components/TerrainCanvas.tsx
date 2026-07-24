@@ -26,11 +26,13 @@ type TerrainCanvasProps = {
   onImmersiveChange: (isImmersive: boolean) => void;
   onToggleMapKey: () => void;
   onCloseMapKey: () => void;
+  onLogout?: () => void;
+  isLoggingOut?: boolean;
 };
 
 type Size = { width: number; height: number };
 type Point = { x: number; y: number };
-type TerrainPosition = { px: number; py: number };
+type TerrainPosition = { px: number; py: number; labelY: number };
 type TerrainLayout = Record<string, TerrainPosition>;
 type TerrainGeometry = ReturnType<typeof terrainGeometry>;
 type MountainSprite = {
@@ -60,6 +62,35 @@ const TERRAIN_LAYOUT_STORAGE_KEY = "code-terra:terrain-layout:v1";
 const SPRITE_ZOOM_STEP = 5;
 const MAX_MOUNTAIN_SPRITES = 320;
 const mountainSpriteCache = new Map<string, MountainSprite>();
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function randomTerrainPhase() {
+  const values = new Uint32Array(1);
+  crypto.getRandomValues(values);
+  return (values[0] / 0xffffffff) * Math.PI * 2;
+}
+
+function terrainLabelY(repository: TerrainRepository, py: number) {
+  return clamp(py - (repository.py - repository.labelY), 0.05, 0.95);
+}
+
+function createTerrainArrangement(repositories: TerrainRepository[]) {
+  const count = Math.max(1, repositories.length);
+  const phase = randomTerrainPhase();
+
+  return Object.fromEntries(repositories.map((repository, index) => {
+    const drift = seededNoise(repository.seed, index, Math.round(phase * 1000)) * 0.26;
+    const angle = phase + index * 2.399963 + drift;
+    const radial = 0.09 + 0.38 * Math.sqrt((index + 1) / count);
+
+    const px = clamp(0.5 + Math.cos(angle) * radial, 0.1, 0.9);
+    const py = clamp(0.51 + Math.sin(angle) * radial * 0.72, 0.14, 0.86);
+    return [repository.id, { px, py, labelY: terrainLabelY(repository, py) }];
+  }));
+}
 
 function seededNoise(seed: number, angleIndex: number, ring: number) {
   const value = Math.sin(seed * 91.73 + angleIndex * 17.17 + ring * 43.11) * 43758.5453;
@@ -445,6 +476,8 @@ export default function TerrainCanvas({
   onImmersiveChange,
   onToggleMapKey,
   onCloseMapKey,
+  onLogout,
+  isLoggingOut = false,
 }: TerrainCanvasProps) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -471,12 +504,23 @@ export default function TerrainCanvas({
     try {
       const storedLayout = window.localStorage.getItem(TERRAIN_LAYOUT_STORAGE_KEY);
       if (!storedLayout) return;
-      const parsed = JSON.parse(storedLayout) as TerrainLayout;
+      const parsed = JSON.parse(storedLayout) as Record<string, Partial<TerrainPosition>>;
       const validLayout = Object.fromEntries(
-        Object.entries(parsed).filter(([, position]) => (
-          Number.isFinite(position?.px)
-          && Number.isFinite(position?.py)
-        )),
+        Object.entries(parsed).flatMap(([repositoryId, position]) => {
+          const repository = repositories.find((item) => item.id === repositoryId);
+          if (!repository || !Number.isFinite(position?.px) || !Number.isFinite(position?.py)) return [];
+          const px = Number(position.px);
+          const py = Number(position.py);
+          const labelY = Number(position.labelY);
+          return [[
+            repositoryId,
+            {
+              px,
+              py,
+              labelY: Number.isFinite(labelY) ? labelY : terrainLabelY(repository, py),
+            },
+          ]];
+        }),
       );
       positionOverridesRef.current = validLayout;
       frameId = window.requestAnimationFrame(() => setPositionOverrides(validLayout));
@@ -486,7 +530,7 @@ export default function TerrainCanvas({
     return () => {
       if (frameId !== null) window.cancelAnimationFrame(frameId);
     };
-  }, []);
+  }, [repositories]);
 
   useEffect(() => {
     interactionPanRef.current = pan;
@@ -538,6 +582,7 @@ export default function TerrainCanvas({
   const availableLanguages = useMemo(() => getLanguageFilters(repositories), [repositories]);
   const currentYear = new Date().getFullYear();
   const firstRepositoryYear = Math.min(currentYear, ...repositories.map((repository) => repository.created));
+  const hasCustomTerrainLayout = Object.keys(positionOverrides).length > 0;
   const timelineYears = useMemo(() => {
     const span = currentYear - firstRepositoryYear;
     const step = Math.max(1, Math.ceil(span / 7));
@@ -595,15 +640,6 @@ export default function TerrainCanvas({
     onImmersiveChange(true);
     requestAnimationFrame(() => canvasRef.current?.focus());
   }, [onImmersiveChange]);
-
-  const openOverview = useCallback(() => {
-    resetView();
-    onCloseMapKey();
-    setIsArranging(false);
-    setArmedRepositoryId(null);
-    setDetailsRepositoryId(null);
-    onImmersiveChange(false);
-  }, [onCloseMapKey, onImmersiveChange, resetView]);
 
   useEffect(() => {
     if (!isImmersive) return;
@@ -795,10 +831,18 @@ export default function TerrainCanvas({
   }, []);
 
   const resetTerrainLayout = useCallback(() => {
-    positionOverridesRef.current = {};
-    setPositionOverrides({});
-    window.localStorage.removeItem(TERRAIN_LAYOUT_STORAGE_KEY);
-  }, []);
+    if (hasCustomTerrainLayout) {
+      positionOverridesRef.current = {};
+      setPositionOverrides({});
+      window.localStorage.removeItem(TERRAIN_LAYOUT_STORAGE_KEY);
+      return;
+    }
+
+    const nextLayout = createTerrainArrangement(repositories);
+    positionOverridesRef.current = nextLayout;
+    setPositionOverrides(nextLayout);
+    persistTerrainLayout();
+  }, [hasCustomTerrainLayout, persistTerrainLayout, repositories]);
 
   const toggleArrangeMode = useCallback(() => {
     setDetailsRepositoryId(null);
@@ -831,7 +875,7 @@ export default function TerrainCanvas({
       mode: targetRepository ? "terrain" : "pan",
       repositoryId: targetRepository?.id,
       terrainOrigin: targetRepository
-        ? { px: targetRepository.px, py: targetRepository.py }
+        ? { px: targetRepository.px, py: targetRepository.py, labelY: targetRepository.labelY }
         : undefined,
       terrainWasCustomized: targetRepository
         ? Boolean(positionOverridesRef.current[targetRepository.id])
@@ -852,6 +896,7 @@ export default function TerrainCanvas({
       const nextPosition = {
         px: Math.max(.05, Math.min(.95, drag.terrainOrigin.px + deltaX / Math.max(1, size.width * scale))),
         py: Math.max(.1, Math.min(.9, drag.terrainOrigin.py + deltaY / Math.max(1, size.height * scale))),
+        labelY: Math.max(.05, Math.min(.95, drag.terrainOrigin.labelY + deltaY / Math.max(1, size.height * scale))),
       };
       const nextLayout = {
         ...positionOverridesRef.current,
@@ -1019,11 +1064,21 @@ export default function TerrainCanvas({
                 {isArranging ? "Done arranging" : "Arrange terrain"}
               </button>
             )}
+            {atlasMode === "terra" && (
+              <button
+                type="button"
+                className="reset-terrain-control"
+                onClick={resetTerrainLayout}
+              >
+                Reset terrain
+              </button>
+            )}
             {atlasMode === "terra" && <button type="button" onClick={handleMapKeyToggle}>{mapKeyOpen ? "Hide map key" : "Map key"}</button>}
-            <button type="button" className="overview-control" onClick={openOverview}>
-              <i aria-hidden="true"/>
-              Overview
-            </button>
+            {onLogout && (
+              <button type="button" className="logout-control" onClick={onLogout} disabled={isLoggingOut}>
+                {isLoggingOut ? "Logging out" : "Logout"}
+              </button>
+            )}
           </nav>
         </div>
       )}
@@ -1176,7 +1231,7 @@ export default function TerrainCanvas({
         <section className="terrain-language-dock" aria-label="Filter terrain by repository language">
           <header>
             <span>Languages used</span>
-            {isArranging && Object.keys(positionOverrides).length > 0
+            {isArranging && hasCustomTerrainLayout
               ? <button type="button" onClick={resetTerrainLayout}>Reset layout</button>
               : <small>{Math.max(0, availableLanguages.length - 1)} detected</small>}
           </header>

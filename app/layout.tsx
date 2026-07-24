@@ -21,6 +21,11 @@ const ibmPlexMono = IBM_Plex_Mono({
 export const metadata: Metadata = {
   title: "Code Terra — Your code has a landscape",
   description: "A private GitHub atlas that shapes your selected repositories into an explorable terrain.",
+  icons: {
+    icon: "/tab-logo.png",
+    shortcut: "/tab-logo.png",
+    apple: "/tab-logo.png",
+  },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
