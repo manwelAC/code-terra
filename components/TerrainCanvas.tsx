@@ -43,6 +43,9 @@ type MountainSprite = {
   width: number;
   height: number;
 };
+type DrawTerrainSceneOptions = {
+  transition?: boolean;
+};
 type DragState = {
   pointerId: number;
   startX: number;
@@ -62,6 +65,8 @@ const MAX_ZOOM = 280;
 const WALK_ENTRY_ZOOM = 280;
 const TERRAIN_LAYOUT_STORAGE_KEY = "code-terra:terrain-layout:v1";
 const SPRITE_ZOOM_STEP = 5;
+const TRANSITION_SPRITE_ZOOM_STEP = 20;
+const TRANSITION_MAX_SPRITE_ZOOM = 180;
 const MAX_MOUNTAIN_SPRITES = 320;
 const mountainSpriteCache = new Map<string, MountainSprite>();
 
@@ -429,7 +434,9 @@ function drawTerrainScene(
   language: LanguageFilter,
   pan: Point,
   dpr: number,
+  options: DrawTerrainSceneOptions = {},
 ) {
+  const transition = options.transition ?? false;
   context.clearRect(0, 0, size.width, size.height);
   context.fillStyle = "#07110d";
   context.fillRect(0, 0, size.width, size.height);
@@ -449,24 +456,25 @@ function drawTerrainScene(
 
   context.strokeStyle = "rgba(188,222,190,0.055)";
   context.lineWidth = 0.55;
-  const gridOffsetX = ((pan.x % 44) + 44) % 44;
-  const gridOffsetY = ((pan.y % 44) + 44) % 44;
-  for (let x = gridOffsetX - 44; x <= size.width + 44; x += 44) {
+  const gridSize = transition ? 88 : 44;
+  const gridOffsetX = ((pan.x % gridSize) + gridSize) % gridSize;
+  const gridOffsetY = ((pan.y % gridSize) + gridSize) % gridSize;
+  for (let x = gridOffsetX - gridSize; x <= size.width + gridSize; x += gridSize) {
     context.beginPath();
     context.moveTo(x, 0);
     context.lineTo(x, size.height);
     context.stroke();
   }
-  for (let y = gridOffsetY - 44; y <= size.height + 44; y += 44) {
+  for (let y = gridOffsetY - gridSize; y <= size.height + gridSize; y += gridSize) {
     context.beginPath();
     context.moveTo(0, y);
     context.lineTo(size.width, y);
     context.stroke();
   }
 
-  for (let line = 0; line < 12; line += 1) {
+  for (let line = 0; line < (transition ? 6 : 12); line += 1) {
     context.beginPath();
-    for (let x = -20; x <= size.width + 20; x += 8) {
+    for (let x = -20; x <= size.width + 20; x += transition ? 18 : 8) {
       const baseline = 28 + line * (size.height / 10.5) + pan.y * 0.12;
       const terrainX = x - pan.x;
       const y = baseline + Math.sin(terrainX * 0.012 + line * 0.9) * 8 + Math.sin(terrainX * 0.026 - line) * 3;
@@ -478,7 +486,7 @@ function drawTerrainScene(
     context.stroke();
   }
 
-  const routeRepositories = repositories
+  const routeRepositories = transition ? [] : repositories
     .filter((repository) => repositoryHasLanguage(repository, language))
     .sort((a, b) => a.created - b.created || a.seed - b.seed);
 
@@ -533,8 +541,12 @@ function drawTerrainScene(
         || geometry.centerY + drawMargin < 0
         || geometry.centerY - geometry.height - drawMargin > size.height
       ) return;
-      const spriteZoom = Math.round(zoom / SPRITE_ZOOM_STEP) * SPRITE_ZOOM_STEP;
-      const spriteGeometry = terrainGeometry(repository, size, spriteZoom, year, { x: 0, y: 0 });
+      const selected = repository.id === selectedId;
+      const dimmed = !repositoryHasLanguage(repository, language);
+      const spriteStep = transition ? TRANSITION_SPRITE_ZOOM_STEP : SPRITE_ZOOM_STEP;
+      const cappedZoom = transition ? Math.min(TRANSITION_MAX_SPRITE_ZOOM, zoom) : zoom;
+      const spriteZoom = Math.round(cappedZoom / spriteStep) * spriteStep;
+      const spriteGeometry = terrainGeometry(repository, size, Math.max(MIN_ZOOM, spriteZoom), year, { x: 0, y: 0 });
       drawCachedMountain(
         context,
         repository,
@@ -544,8 +556,8 @@ function drawTerrainScene(
         zoom,
         year,
         pan,
-        repository.id === selectedId,
-        !repositoryHasLanguage(repository, language),
+        selected,
+        dimmed,
         dpr,
       );
     });
@@ -841,10 +853,10 @@ export default function TerrainCanvas({
     if (panFrameRef.current !== null) cancelAnimationFrame(panFrameRef.current);
   }, []);
 
-  const renderTerrainFrame = useCallback((framePan: Point, frameZoom: number) => {
+  const renderTerrainFrame = useCallback((framePan: Point, frameZoom: number, transition = false) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = transition ? 1 : Math.min(window.devicePixelRatio || 1, 2);
     const pixelWidth = Math.round(size.width * dpr);
     const pixelHeight = Math.round(size.height * dpr);
     if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
@@ -854,7 +866,7 @@ export default function TerrainCanvas({
 
     context.setTransform(dpr, 0, 0, dpr, 0, 0);
     context.clearRect(0, 0, size.width, size.height);
-    drawTerrainScene(context, availableRepositories, selectedId, size, frameZoom, year, language, framePan, dpr);
+    drawTerrainScene(context, availableRepositories, selectedId, size, frameZoom, year, language, framePan, dpr, { transition });
     renderedPanRef.current = framePan;
   }, [availableRepositories, language, selectedId, size, year]);
 
@@ -959,7 +971,7 @@ export default function TerrainCanvas({
     setIsNavigating(true);
     setIsWalkTransitioning(true);
     setAtlasTransitionLabel("Zooming into terrain");
-    renderTerrainFrame(startPan, startZoom);
+    renderTerrainFrame(startPan, startZoom, true);
 
     const transitionFrame = (timestamp: number) => {
       const progress = Math.min(1, (timestamp - startedAt) / duration);
@@ -970,13 +982,14 @@ export default function TerrainCanvas({
       renderTerrainFrame({
         x: startPan.x + (targetPan.x - startPan.x) * eased,
         y: startPan.y + (targetPan.y - startPan.y) * eased,
-      }, nextZoom);
+      }, nextZoom, true);
 
       if (progress < 1) {
         panFrameRef.current = requestAnimationFrame(transitionFrame);
       } else {
         panFrameRef.current = null;
         skipTransitionRef.current = true;
+        renderTerrainFrame(targetPan, targetZoom);
         setPan(targetPan);
         onZoomChange(targetZoom);
         setIsNavigating(false);
@@ -1024,7 +1037,7 @@ export default function TerrainCanvas({
     setIsNavigating(true);
     setIsWalkTransitioning(true);
     setAtlasTransitionLabel("Returning to Terra View");
-    renderTerrainFrame(startPan, startZoom);
+    renderTerrainFrame(startPan, startZoom, true);
 
     const transitionFrame = (timestamp: number) => {
       const progress = Math.min(1, (timestamp - startedAt) / duration);
@@ -1033,13 +1046,14 @@ export default function TerrainCanvas({
       renderTerrainFrame({
         x: startPan.x + (targetPan.x - startPan.x) * eased,
         y: startPan.y + (targetPan.y - startPan.y) * eased,
-      }, nextZoom);
+      }, nextZoom, true);
 
       if (progress < 1) {
         panFrameRef.current = requestAnimationFrame(transitionFrame);
       } else {
         panFrameRef.current = null;
         skipTransitionRef.current = true;
+        renderTerrainFrame(targetPan, targetZoom);
         setPan(targetPan);
         onZoomChange(targetZoom);
         setIsNavigating(false);

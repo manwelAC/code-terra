@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { compactNumber, repositoryHasLanguage, type LanguageFilter, type TerrainRepository } from "@/lib/repositories";
+import { createRepositoryTerrainGeometry, repositoryTerrainHeightAt } from "@/components/walk-mode-terrain";
 
 type WalkModeSceneProps = {
   repositories: TerrainRepository[];
@@ -17,15 +18,14 @@ type WalkModeSceneProps = {
 type WalkKey = "forward" | "backward" | "left" | "right" | "run";
 export type WalkModePosition = { px: number; py: number };
 
-const POSITION_WORLD_SIZE = 2900;
-const TERRAIN_WORLD_SIZE = 960;
-const EYE_HEIGHT = 15.5;
+const POSITION_WORLD_SIZE = 7600;
+const TERRAIN_WORLD_SIZE = 1240;
+const EYE_HEIGHT = 20;
 const MAX_PITCH = Math.PI * 0.42;
 const GROUND_SIZE = POSITION_WORLD_SIZE * 1.56;
 const POSITION_REPORT_INTERVAL = 120;
 const GRASS_BLADE_COUNT = 2_000_000;
 const GRASS_FIELD_SIZE = GROUND_SIZE * 0.9;
-const WALK_BODY_RADIUS = 18;
 
 type GrassFieldMesh = THREE.Mesh<THREE.InstancedBufferGeometry, THREE.ShaderMaterial>;
 let grassFieldCache: { key: string; mesh: GrassFieldMesh } | null = null;
@@ -43,20 +43,15 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
-function seededTerrainNoise(seed: number, segment: number, ring: number) {
-  const value = Math.sin(seed * 81.71 + segment * 19.91 + ring * 47.13) * 43758.5453;
-  return (value - Math.floor(value)) * 2 - 1;
-}
-
 function terraGrowth(repository: TerrainRepository, year: number) {
   return Math.min(1, 0.48 + (year - repository.created) * 0.13);
 }
 
 function terraWalkGeometry(repository: TerrainRepository, year: number) {
   const growth = terraGrowth(repository, year);
-  const radiusX = TERRAIN_WORLD_SIZE * 0.24 * repository.spread * growth;
-  const radiusZ = radiusX * 1.08;
-  const height = TERRAIN_WORLD_SIZE * (0.12 + 0.26 * repository.relief * growth);
+  const radiusX = TERRAIN_WORLD_SIZE * (0.22 + repository.spread * 0.16) * (0.72 + growth * 0.38);
+  const radiusZ = radiusX * (0.86 + repository.relief * 0.22);
+  const height = TERRAIN_WORLD_SIZE * (0.08 + 0.2 * repository.relief * growth);
 
   return {
     x: (repository.px - 0.5) * POSITION_WORLD_SIZE,
@@ -89,6 +84,26 @@ function groundHeightAt(x: number, z: number) {
     + Math.sin((x + groundY) * 0.018) * 0.2;
 }
 
+function walkSurfaceHeightAt(
+  x: number,
+  z: number,
+  mountainEntries: Array<WalkTerrainGeometry & { repository: TerrainRepository }>,
+) {
+  let surfaceHeight = groundHeightAt(x, z);
+
+  mountainEntries.forEach((entry) => {
+    const terrainHeight = repositoryTerrainHeightAt(
+      entry.repository,
+      entry,
+      x - entry.x,
+      z - entry.z,
+    );
+    surfaceHeight = Math.max(surfaceHeight, terrainHeight);
+  });
+
+  return surfaceHeight;
+}
+
 function nextGrassRandom(state: { value: number }) {
   state.value = (Math.imul(1664525, state.value) + 1013904223) >>> 0;
   return state.value / 0xffffffff;
@@ -110,104 +125,7 @@ function createGroundGeometry() {
 }
 
 function createMountainMeshGeometry(repository: TerrainRepository, geometry: WalkTerrainGeometry) {
-  const segments = 84;
-  const rings = 13;
-  const vertices: number[] = [];
-  const indices: number[] = [];
-
-  for (let ring = 0; ring <= rings; ring += 1) {
-    const fraction = ring / rings;
-    const radiusFraction = ring === 0 ? 0.1 : Math.pow(fraction, 0.58);
-    const elevation = geometry.height * Math.pow(1 - Math.pow(fraction, 1.22), 0.94);
-    const roughness = 0.008 + fraction * 0.028;
-
-    for (let segment = 0; segment < segments; segment += 1) {
-      const angle = (segment / segments) * Math.PI * 2;
-      const edgeNoise = 1 + seededTerrainNoise(repository.seed, segment, ring) * roughness;
-      const shoulderNoise = 1 + seededTerrainNoise(repository.seed + 17, segment, ring + 3) * 0.05;
-      const radiusX = geometry.radiusX * radiusFraction * edgeNoise;
-      const radiusZ = geometry.radiusZ * radiusFraction * shoulderNoise;
-      vertices.push(Math.cos(angle) * radiusX, elevation, Math.sin(angle) * radiusZ);
-    }
-  }
-
-  for (let ring = 0; ring < rings; ring += 1) {
-    for (let segment = 0; segment < segments; segment += 1) {
-      const current = ring * segments + segment;
-      const next = ring * segments + ((segment + 1) % segments);
-      const below = (ring + 1) * segments + segment;
-      const belowNext = (ring + 1) * segments + ((segment + 1) % segments);
-      indices.push(current, below, next, next, below, belowNext);
-    }
-  }
-
-  const meshGeometry = new THREE.BufferGeometry();
-  meshGeometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
-  meshGeometry.setIndex(indices);
-  meshGeometry.computeVertexNormals();
-  return meshGeometry;
-}
-
-function resolveTerrainCollision(
-  x: number,
-  z: number,
-  mountainEntries: Array<WalkTerrainGeometry & { repository: TerrainRepository }>,
-) {
-  let nextX = x;
-  let nextZ = z;
-
-  for (let pass = 0; pass < 4; pass += 1) {
-    mountainEntries.forEach((entry) => {
-      const radiusX = Math.max(1, entry.radiusX * 0.98 + WALK_BODY_RADIUS);
-      const radiusZ = Math.max(1, entry.radiusZ * 0.98 + WALK_BODY_RADIUS);
-      const dx = nextX - entry.x;
-      const dz = nextZ - entry.z;
-      const normalizedDistance = (dx * dx) / (radiusX * radiusX) + (dz * dz) / (radiusZ * radiusZ);
-      if (normalizedDistance >= 1) return;
-
-      const angle = Math.atan2(dz / radiusZ || 0.001, dx / radiusX || 0.001);
-      nextX = entry.x + Math.cos(angle) * radiusX;
-      nextZ = entry.z + Math.sin(angle) * radiusZ;
-    });
-  }
-
-  return { x: nextX, z: nextZ };
-}
-
-function isInsideTerrainCollision(
-  x: number,
-  z: number,
-  mountainEntries: Array<WalkTerrainGeometry & { repository: TerrainRepository }>,
-) {
-  return mountainEntries.some((entry) => {
-    const radiusX = Math.max(1, entry.radiusX * 0.98 + WALK_BODY_RADIUS);
-    const radiusZ = Math.max(1, entry.radiusZ * 0.98 + WALK_BODY_RADIUS);
-    const dx = x - entry.x;
-    const dz = z - entry.z;
-    return (dx * dx) / (radiusX * radiusX) + (dz * dz) / (radiusZ * radiusZ) < 1;
-  });
-}
-
-function resolveWalkMovement(
-  currentX: number,
-  currentZ: number,
-  attemptedX: number,
-  attemptedZ: number,
-  mountainEntries: Array<WalkTerrainGeometry & { repository: TerrainRepository }>,
-) {
-  if (!isInsideTerrainCollision(attemptedX, attemptedZ, mountainEntries)) {
-    return { x: attemptedX, z: attemptedZ };
-  }
-
-  if (!isInsideTerrainCollision(attemptedX, currentZ, mountainEntries)) {
-    return { x: attemptedX, z: currentZ };
-  }
-
-  if (!isInsideTerrainCollision(currentX, attemptedZ, mountainEntries)) {
-    return { x: currentX, z: attemptedZ };
-  }
-
-  return { x: currentX, z: currentZ };
+  return createRepositoryTerrainGeometry(repository, geometry);
 }
 
 function createGrassClearingCells(mountainEntries: Array<WalkTerrainGeometry & { repository: TerrainRepository }>) {
@@ -455,9 +373,9 @@ export default function WalkModeScene({ repositories, selectedId, year, language
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color("#07110d");
-    scene.fog = new THREE.FogExp2("#07110d", 0.00092);
+    scene.fog = new THREE.FogExp2("#07110d", 0.00046);
 
-    const camera = new THREE.PerspectiveCamera(64, 1, 0.1, 4200);
+    const camera = new THREE.PerspectiveCamera(64, 1, 0.1, 9800);
     camera.position.set(0, EYE_HEIGHT, 560);
     camera.rotation.order = "YXZ";
 
@@ -527,11 +445,22 @@ export default function WalkModeScene({ repositories, selectedId, year, language
         transparent: true,
         opacity: selected ? 0.98 : dimmed ? 0.2 : 0.88,
         flatShading: true,
+        vertexColors: true,
         side: THREE.DoubleSide,
       });
       const mountain = new THREE.Mesh(createMountainMeshGeometry(repository, geometry), material);
       mountain.position.set(geometry.x, 0, geometry.z);
       mountainGroup.add(mountain);
+
+      const wireframeMaterial = new THREE.LineBasicMaterial({
+        color: "#101811",
+        transparent: true,
+        opacity: selected ? 0.24 : dimmed ? 0.035 : 0.15,
+        depthWrite: false,
+      });
+      const wireframe = new THREE.LineSegments(new THREE.WireframeGeometry(mountain.geometry), wireframeMaterial);
+      wireframe.position.set(geometry.x, 0.4, geometry.z);
+      mountainGroup.add(wireframe);
 
       const foothillMaterial = new THREE.MeshBasicMaterial({
         color,
@@ -540,7 +469,7 @@ export default function WalkModeScene({ repositories, selectedId, year, language
         depthWrite: false,
       });
       const foothill = new THREE.Mesh(new THREE.CircleGeometry(1, 96), foothillMaterial);
-      foothill.scale.set(geometry.radiusX * 1.75, geometry.radiusZ * 2.05, 1);
+      foothill.scale.set(geometry.radiusX * 1.42, geometry.radiusZ * 1.52, 1);
       foothill.rotation.x = -Math.PI / 2;
       foothill.position.set(geometry.x, 0.1, geometry.z);
       mountainGroup.add(foothill);
@@ -570,7 +499,7 @@ export default function WalkModeScene({ repositories, selectedId, year, language
       contours.position.set(geometry.x, 0.08, geometry.z);
       mountainGroup.add(contours);
 
-      return { repository, dimmed, ...geometry, mountain, contours, foothill, material, contourMaterial, foothillMaterial };
+      return { repository, dimmed, ...geometry, mountain, wireframe, contours, foothill, material, wireframeMaterial, contourMaterial, foothillMaterial };
     });
 
     const grassField = createGrassField(mountainEntries);
@@ -594,25 +523,23 @@ export default function WalkModeScene({ repositories, selectedId, year, language
     const spawnPosition = initialPositionRef.current;
     if (spawnPosition) {
       const spawn = atlasPositionToWalkWorld(spawnPosition);
+      const spawnX = Math.max(-boundary, Math.min(boundary, spawn.x));
+      const spawnZ = Math.max(-boundary, Math.min(boundary, spawn.z));
       camera.position.set(
-        Math.max(-boundary, Math.min(boundary, spawn.x)),
-        EYE_HEIGHT,
-        Math.max(-boundary, Math.min(boundary, spawn.z)),
+        spawnX,
+        walkSurfaceHeightAt(spawnX, spawnZ, mountainEntries) + EYE_HEIGHT,
+        spawnZ,
       );
-      const safeStart = resolveTerrainCollision(camera.position.x, camera.position.z, mountainEntries);
-      camera.position.x = Math.max(-boundary, Math.min(boundary, safeStart.x));
-      camera.position.z = Math.max(-boundary, Math.min(boundary, safeStart.z));
       yaw = 0;
       pitch = -0.08;
     } else if (selectedEntry) {
+      const spawnX = Math.max(-boundary, Math.min(boundary, selectedEntry.x));
+      const spawnZ = Math.min(boundary, selectedEntry.z + selectedEntry.radiusZ + 620);
       camera.position.set(
-        selectedEntry.x,
-        EYE_HEIGHT,
-        Math.min(boundary, selectedEntry.z + selectedEntry.radiusZ + 285),
+        spawnX,
+        walkSurfaceHeightAt(spawnX, spawnZ, mountainEntries) + EYE_HEIGHT,
+        spawnZ,
       );
-      const safeStart = resolveTerrainCollision(camera.position.x, camera.position.z, mountainEntries);
-      camera.position.x = Math.max(-boundary, Math.min(boundary, safeStart.x));
-      camera.position.z = Math.max(-boundary, Math.min(boundary, safeStart.z));
       yaw = 0;
       pitch = -0.08;
     }
@@ -626,6 +553,7 @@ export default function WalkModeScene({ repositories, selectedId, year, language
         const selected = entry.repository.id === selectedIdRef.current;
         entry.material.emissiveIntensity = selected ? 0.3 : entry.dimmed ? 0.035 : 0.08;
         entry.material.opacity = selected ? 0.98 : entry.dimmed ? 0.2 : 0.88;
+        entry.wireframeMaterial.opacity = selected ? 0.24 : entry.dimmed ? 0.035 : 0.15;
         entry.contourMaterial.opacity = selected ? 0.58 : entry.dimmed ? 0.06 : 0.24;
         entry.foothillMaterial.opacity = selected ? 0.22 : entry.dimmed ? 0.04 : 0.12;
       });
@@ -696,21 +624,11 @@ export default function WalkModeScene({ repositories, selectedId, year, language
         const attemptedZ = camera.position.z + (-Math.cos(yaw) * forward - Math.sin(yaw) * strafe) * speed;
         const clampedAttemptX = Math.max(-boundary, Math.min(boundary, attemptedX));
         const clampedAttemptZ = Math.max(-boundary, Math.min(boundary, attemptedZ));
-        const resolvedPosition = resolveWalkMovement(
-          camera.position.x,
-          camera.position.z,
-          clampedAttemptX,
-          clampedAttemptZ,
-          mountainEntries,
-        );
-        const safePosition = resolveTerrainCollision(
-          Math.max(-boundary, Math.min(boundary, attemptedX)),
-          Math.max(-boundary, Math.min(boundary, attemptedZ)),
-          mountainEntries,
-        );
-        camera.position.x = Math.max(-boundary, Math.min(boundary, isInsideTerrainCollision(resolvedPosition.x, resolvedPosition.z, mountainEntries) ? safePosition.x : resolvedPosition.x));
-        camera.position.z = Math.max(-boundary, Math.min(boundary, isInsideTerrainCollision(resolvedPosition.x, resolvedPosition.z, mountainEntries) ? safePosition.z : resolvedPosition.z));
+        camera.position.x = clampedAttemptX;
+        camera.position.z = clampedAttemptZ;
       }
+      const targetEyeHeight = walkSurfaceHeightAt(camera.position.x, camera.position.z, mountainEntries) + EYE_HEIGHT;
+      camera.position.y += (targetEyeHeight - camera.position.y) * Math.min(1, delta * 16);
 
       const now = performance.now();
       if (now - lastPositionReport > POSITION_REPORT_INTERVAL) {
