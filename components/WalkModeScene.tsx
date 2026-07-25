@@ -3,6 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { compactNumber, repositoryHasLanguage, type LanguageFilter, type TerrainRepository } from "@/lib/repositories";
+import { createCachedCloudLayer } from "@/components/walk-mode-clouds";
+import { createCachedFireflyField } from "@/components/walk-mode-fireflies";
+import { createCachedStarField } from "@/components/walk-mode-stars";
 import { createRepositoryTerrainGeometry, repositoryTerrainHeightAt } from "@/components/walk-mode-terrain";
 
 type WalkModeSceneProps = {
@@ -26,6 +29,9 @@ const MAX_PITCH = Math.PI * 0.42;
 const GROUND_SIZE = POSITION_WORLD_SIZE * 1.56;
 const POSITION_REPORT_INTERVAL = 120;
 const GRASS_BLADE_COUNT = 2_000_000;
+const FIREFLY_COUNT = 45_000;
+const CLOUD_PUFF_COUNT = 7_500;
+const STAR_COUNT = 85_000;
 const GRASS_FIELD_SIZE = GROUND_SIZE * 0.9;
 
 type GrassFieldMesh = THREE.Mesh<THREE.InstancedBufferGeometry, THREE.ShaderMaterial>;
@@ -837,6 +843,24 @@ export default function WalkModeScene({ repositories, selectedId, year, language
     grassField.position.y = 0.04;
     scene.add(grassField);
 
+    const fireflyField = createCachedFireflyField({
+      count: FIREFLY_COUNT,
+      fieldSize: GROUND_SIZE * 0.94,
+    });
+    scene.add(fireflyField);
+
+    const cloudLayer = createCachedCloudLayer({
+      count: CLOUD_PUFF_COUNT,
+      fieldSize: GROUND_SIZE * 0.82,
+    });
+    scene.add(cloudLayer);
+
+    const starField = createCachedStarField({
+      count: STAR_COUNT,
+      fieldSize: GROUND_SIZE * 1.04,
+    });
+    scene.add(starField);
+
     const raycaster = new THREE.Raycaster();
     raycaster.far = POSITION_WORLD_SIZE;
     const reticlePoint = new THREE.Vector2(0, 0);
@@ -976,6 +1000,12 @@ export default function WalkModeScene({ repositories, selectedId, year, language
       const delta = Math.min(0.05, clock.getDelta());
       const grassTime = grassField.material.uniforms.uTime;
       if (grassTime) grassTime.value = clock.elapsedTime;
+      const fireflyTime = fireflyField.material.uniforms.uTime;
+      if (fireflyTime) fireflyTime.value = clock.elapsedTime;
+      const cloudTime = cloudLayer.material.uniforms.uTime;
+      if (cloudTime) cloudTime.value = clock.elapsedTime;
+      const starTime = starField.material.uniforms.uTime;
+      if (starTime) starTime.value = clock.elapsedTime;
       if (activeHologram) {
         const bob = Math.sin(clock.elapsedTime * 2.4) * 4;
         const corePulse = 1 + Math.sin(clock.elapsedTime * 4.2) * 0.12;
@@ -1070,6 +1100,9 @@ export default function WalkModeScene({ repositories, selectedId, year, language
       if (document.pointerLockElement === renderer.domElement) document.exitPointerLock();
       reportWalkPosition();
       clearTerrainHologram();
+      scene.remove(starField);
+      scene.remove(cloudLayer);
+      scene.remove(fireflyField);
       scene.remove(grassField);
       host.removeChild(renderer.domElement);
       disposeObject(scene);

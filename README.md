@@ -48,6 +48,12 @@ Estimated lines of code are derived from the language-byte totals reported by Gi
   <img src="./public/click.png" alt="click-action" width="720">
 </h1>
 
+### Phase 1.2
+
+<p align="center"><strong>Walk Mode</strong></p>
+<h1 align="center">
+  <img src="./public/phase-1.2-walk-view.png" alt="walkmode1.2" width="720">
+</h1>
 
 ### Interactive terrain atlas
 
