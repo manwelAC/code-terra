@@ -67,6 +67,8 @@ const TERRAIN_LAYOUT_STORAGE_KEY = "code-terra:terrain-layout:v1";
 const SPRITE_ZOOM_STEP = 5;
 const TRANSITION_SPRITE_ZOOM_STEP = 20;
 const TRANSITION_MAX_SPRITE_ZOOM = 180;
+const WALK_MODE_MOUNT_DELAY_MS = 220;
+const WALK_MODE_MIN_LOADING_MS = 1120;
 const MAX_MOUNTAIN_SPRITES = 320;
 const mountainSpriteCache = new Map<string, MountainSprite>();
 
@@ -589,6 +591,8 @@ export default function TerrainCanvas({
   const renderedPanRef = useRef<Point>({ x: 0, y: 0 });
   const skipTransitionRef = useRef(false);
   const walkReturnViewRef = useRef<{ pan: Point; zoom: number } | null>(null);
+  const walkLoadingStartedAtRef = useRef(0);
+  const walkMountTimeoutRef = useRef<number | null>(null);
   const walkReadyTimeoutRef = useRef<number | null>(null);
   const [size, setSize] = useState<Size>({ width: 900, height: 642 });
   const [pan, setPan] = useState<Point>({ x: 0, y: 0 });
@@ -854,6 +858,7 @@ export default function TerrainCanvas({
   useEffect(() => () => {
     if (animationFrameRef.current !== null) cancelAnimationFrame(animationFrameRef.current);
     if (panFrameRef.current !== null) cancelAnimationFrame(panFrameRef.current);
+    if (walkMountTimeoutRef.current !== null) window.clearTimeout(walkMountTimeoutRef.current);
     if (walkReadyTimeoutRef.current !== null) window.clearTimeout(walkReadyTimeoutRef.current);
   }, []);
 
@@ -935,11 +940,28 @@ export default function TerrainCanvas({
   }, []);
 
   const clearWalkReadyTimer = useCallback(() => {
+    if (walkMountTimeoutRef.current !== null) {
+      window.clearTimeout(walkMountTimeoutRef.current);
+      walkMountTimeoutRef.current = null;
+    }
     if (walkReadyTimeoutRef.current !== null) {
       window.clearTimeout(walkReadyTimeoutRef.current);
       walkReadyTimeoutRef.current = null;
     }
   }, []);
+
+  const beginWalkModeHandoff = useCallback(() => {
+    clearWalkReadyTimer();
+    walkLoadingStartedAtRef.current = performance.now();
+    setIsWalkModeSettling(false);
+    setIsWalkTransitioning(true);
+    setIsWalkModeLoading(true);
+    setAtlasTransitionLabel("Entering Walk Mode...");
+    walkMountTimeoutRef.current = window.setTimeout(() => {
+      walkMountTimeoutRef.current = null;
+      setAtlasMode("walk");
+    }, WALK_MODE_MOUNT_DELAY_MS);
+  }, [clearWalkReadyTimer]);
 
   const transitionIntoWalkMode = useCallback(() => {
     clearWalkReadyTimer();
@@ -975,10 +997,7 @@ export default function TerrainCanvas({
     if (reducedMotion) {
       setPan(targetPan);
       onZoomChange(targetZoom);
-      setIsWalkTransitioning(true);
-      setIsWalkModeLoading(true);
-      setAtlasTransitionLabel("Entering Walk Mode...");
-      requestAnimationFrame(() => setAtlasMode("walk"));
+      beginWalkModeHandoff();
       return;
     }
 
@@ -1008,14 +1027,12 @@ export default function TerrainCanvas({
         setPan(targetPan);
         onZoomChange(targetZoom);
         setIsNavigating(false);
-        setIsWalkModeLoading(true);
-        setAtlasTransitionLabel("Entering Walk Mode...");
-        requestAnimationFrame(() => setAtlasMode("walk"));
+        beginWalkModeHandoff();
       }
     };
 
     panFrameRef.current = requestAnimationFrame(transitionFrame);
-  }, [availableRepositories, clampPan, clearWalkReadyTimer, lastWalkPosition, onCloseMapKey, onZoomChange, renderTerrainFrame, selectedId, size]);
+  }, [availableRepositories, beginWalkModeHandoff, clampPan, clearWalkReadyTimer, lastWalkPosition, onCloseMapKey, onZoomChange, renderTerrainFrame, selectedId, size]);
 
   const transitionBackToTerraView = useCallback(() => {
     clearWalkReadyTimer();
@@ -1109,15 +1126,27 @@ export default function TerrainCanvas({
 
   const handleWalkModeReady = useCallback(() => {
     clearWalkReadyTimer();
-    setIsWalkModeLoading(false);
-    setIsWalkModeSettling(true);
-    setAtlasTransitionLabel("Walk Mode Ready");
-    walkReadyTimeoutRef.current = window.setTimeout(() => {
+    const elapsed = performance.now() - walkLoadingStartedAtRef.current;
+    const remainingLoadingTime = Math.max(0, WALK_MODE_MIN_LOADING_MS - elapsed);
+
+    const finishWalkModeHandoff = () => {
       walkReadyTimeoutRef.current = null;
-      setIsWalkModeSettling(false);
-      setIsWalkTransitioning(false);
-      setAtlasTransitionLabel(null);
-    }, 560);
+      setIsWalkModeLoading(false);
+      setIsWalkModeSettling(true);
+      setAtlasTransitionLabel("Walk Mode Ready");
+      walkReadyTimeoutRef.current = window.setTimeout(() => {
+        walkReadyTimeoutRef.current = null;
+        setIsWalkModeSettling(false);
+        setIsWalkTransitioning(false);
+        setAtlasTransitionLabel(null);
+      }, 560);
+    };
+
+    if (remainingLoadingTime > 0) {
+      walkReadyTimeoutRef.current = window.setTimeout(finishWalkModeHandoff, remainingLoadingTime);
+    } else {
+      finishWalkModeHandoff();
+    }
   }, [clearWalkReadyTimer]);
 
   const terrainAtPoint = useCallback(

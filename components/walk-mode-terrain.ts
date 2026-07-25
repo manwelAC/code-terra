@@ -64,6 +64,7 @@ export function createRepositoryTerrainGeometry(repository: TerrainRepository, g
   const vertices: number[] = [];
   const colors: number[] = [];
   const indices: number[] = [];
+  const elevations: number[] = [];
   const color = new THREE.Color();
   const repoTint = new THREE.Color(repository.color);
 
@@ -85,9 +86,15 @@ export function createRepositoryTerrainGeometry(repository: TerrainRepository, g
       color.lerp(repoTint, 0.08 + normalizedHeight * 0.22);
       color.offsetHSL(0, 0, ridgeNoise * 0.035);
       vertices.push(localX, elevation, localZ);
+      elevations.push(elevation);
       colors.push(color.r, color.g, color.b);
     }
   }
+
+  const pushTriangle = (a: number, b: number, c: number) => {
+    if (Math.max(elevations[a], elevations[b], elevations[c]) <= 0.04) return;
+    indices.push(a, b, c);
+  };
 
   for (let row = 0; row < rows; row += 1) {
     for (let column = 0; column < columns; column += 1) {
@@ -95,7 +102,8 @@ export function createRepositoryTerrainGeometry(repository: TerrainRepository, g
       const next = current + 1;
       const below = current + columns + 1;
       const belowNext = below + 1;
-      indices.push(current, below, next, next, below, belowNext);
+      pushTriangle(current, below, next);
+      pushTriangle(next, below, belowNext);
     }
   }
 

@@ -35,6 +35,20 @@ Estimated lines of code are derived from the language-byte totals reported by Gi
   <img src="./public/first-walk.png" alt="first-terra view" width="720">
 </h1>
 
+### Phase 1.1
+
+<p align="center"><strong>Walk Mode</strong></p>
+<h1 align="center">
+  <img src="./public/phase-2-walk-view.png" alt="walkmode1.1" width="720">
+</h1>
+
+<p align="center"><strong>Click action - Walk mode</strong></p>
+
+<h1 align="center">
+  <img src="./public/click.png" alt="click-action" width="720">
+</h1>
+
+
 ### Interactive terrain atlas
 
 Explore every selected repository in one continuous landscape. Pan and zoom across the atlas, select a terrain for more detail, reset the view with the compass, or open the full terrain experience for a focused map view.

@@ -40,6 +40,17 @@ type WalkTerrainGeometry = {
   growth: number;
 };
 
+type WalkMountainEntry = WalkTerrainGeometry & {
+  repository: TerrainRepository;
+  dimmed: boolean;
+  mountain: THREE.Mesh;
+  wireframe: THREE.LineSegments;
+  contours: THREE.Group;
+  material: THREE.MeshStandardMaterial;
+  wireframeMaterial: THREE.LineBasicMaterial;
+  contourMaterial: THREE.LineBasicMaterial;
+};
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
@@ -340,9 +351,335 @@ function disposeObject(object: THREE.Object3D) {
     const mesh = child as THREE.Mesh;
     mesh.geometry?.dispose();
     const material = mesh.material;
-    if (Array.isArray(material)) material.forEach((item) => item.dispose());
-    else material?.dispose();
+    if (Array.isArray(material)) {
+      material.forEach((item) => {
+        const texturedMaterial = item as THREE.Material & { map?: THREE.Texture };
+        texturedMaterial.map?.dispose();
+        item.dispose();
+      });
+    } else if (material) {
+      const texturedMaterial = material as THREE.Material & { map?: THREE.Texture };
+      texturedMaterial.map?.dispose();
+      material.dispose();
+    }
   });
+}
+
+function drawRoundedRect(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
+  context.beginPath();
+  context.moveTo(x + radius, y);
+  context.lineTo(x + width - radius, y);
+  context.quadraticCurveTo(x + width, y, x + width, y + radius);
+  context.lineTo(x + width, y + height - radius);
+  context.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+  context.lineTo(x + radius, y + height);
+  context.quadraticCurveTo(x, y + height, x, y + height - radius);
+  context.lineTo(x, y + radius);
+  context.quadraticCurveTo(x, y, x + radius, y);
+  context.closePath();
+}
+
+function drawHologramMetric(context: CanvasRenderingContext2D, label: string, value: string, x: number, y: number, width: number) {
+  context.strokeStyle = "rgba(216, 245, 106, 0.34)";
+  context.fillStyle = "rgba(7, 24, 18, 0.48)";
+  drawRoundedRect(context, x, y, width, 112, 14);
+  context.fill();
+  context.stroke();
+
+  context.fillStyle = "rgba(238, 255, 196, 0.7)";
+  context.font = "700 20px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+  context.fillText(label, x + 24, y + 36);
+
+  context.fillStyle = "#f7ffd5";
+  context.font = "800 43px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+  context.fillText(value, x + 24, y + 86);
+}
+
+function drawCornerBrackets(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number) {
+  const bracket = 46;
+  context.strokeStyle = "rgba(216, 245, 106, 0.95)";
+  context.lineWidth = 5;
+  [
+    [x, y, x + bracket, y, x, y + bracket],
+    [x + width, y, x + width - bracket, y, x + width, y + bracket],
+    [x, y + height, x + bracket, y + height, x, y + height - bracket],
+    [x + width, y + height, x + width - bracket, y + height, x + width, y + height - bracket],
+  ].forEach(([startX, startY, lineX, lineY, turnX, turnY]) => {
+    context.beginPath();
+    context.moveTo(startX, startY);
+    context.lineTo(lineX, lineY);
+    context.moveTo(startX, startY);
+    context.lineTo(turnX, turnY);
+    context.stroke();
+  });
+}
+
+function createHologramTexture(repository: TerrainRepository) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1280;
+  canvas.height = 720;
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+
+  context.clearRect(0, 0, canvas.width, canvas.height);
+
+  const aura = context.createRadialGradient(640, 360, 80, 640, 360, 600);
+  aura.addColorStop(0, "rgba(216, 245, 106, 0.13)");
+  aura.addColorStop(1, "rgba(216, 245, 106, 0)");
+  context.fillStyle = aura;
+  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  const panelGradient = context.createLinearGradient(0, 58, 0, 646);
+  panelGradient.addColorStop(0, "rgba(12, 35, 28, 0.76)");
+  panelGradient.addColorStop(0.52, "rgba(5, 21, 16, 0.52)");
+  panelGradient.addColorStop(1, "rgba(8, 25, 19, 0.66)");
+  context.fillStyle = panelGradient;
+  drawRoundedRect(context, 82, 58, 1116, 588, 30);
+  context.fill();
+
+  context.strokeStyle = "rgba(86, 231, 199, 0.32)";
+  context.lineWidth = 2;
+  drawRoundedRect(context, 104, 82, 1072, 540, 22);
+  context.stroke();
+
+  drawCornerBrackets(context, 82, 58, 1116, 588);
+
+  context.strokeStyle = "rgba(86, 231, 199, 0.18)";
+  context.lineWidth = 2;
+  for (let y = 118; y < 604; y += 38) {
+    context.beginPath();
+    context.moveTo(120, y);
+    context.lineTo(1160, y);
+    context.stroke();
+  }
+
+  context.fillStyle = "rgba(216, 245, 106, 0.86)";
+  context.font = "800 25px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+  context.fillText("TERRAIN DOSSIER", 132, 128);
+
+  context.fillStyle = "rgba(86, 231, 199, 0.78)";
+  context.font = "700 19px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+  context.fillText("LIVE REPOSITORY SIGNAL", 132, 160);
+
+  context.fillStyle = "#ffffff";
+  context.font = "850 72px Inter, Arial, sans-serif";
+  context.fillText(repository.name, 132, 246, 850);
+
+  context.fillStyle = repository.color;
+  drawRoundedRect(context, 132, 286, 30, 30, 8);
+  context.fill();
+
+  context.fillStyle = "rgba(245, 255, 221, 0.82)";
+  context.font = "700 28px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+  context.fillText(`${repository.language} / ${repository.private ? "PRIVATE" : "PUBLIC"} / ${repository.created}`, 182, 311);
+
+  drawHologramMetric(context, repository.metricsEstimated ? "EST. LOC" : "LOC", compactNumber(repository.lines), 132, 372, 292);
+  drawHologramMetric(context, "COMMITS", compactNumber(repository.commits), 494, 372, 292);
+  drawHologramMetric(context, "FILES", compactNumber(repository.files), 856, 372, 292);
+
+  context.fillStyle = "rgba(245, 255, 221, 0.7)";
+  context.font = "700 25px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+  context.fillText(`LAST ACTIVITY / ${repository.activity.toUpperCase()}`, 132, 558, 850);
+
+  context.fillStyle = "rgba(86, 231, 199, 0.72)";
+  context.fillRect(132, 586, Math.max(90, Math.min(820, repository.relief * 820)), 8);
+  context.fillStyle = "rgba(216, 245, 106, 0.68)";
+  context.fillRect(132, 606, Math.max(90, Math.min(820, repository.spread * 820)), 8);
+
+  context.strokeStyle = "rgba(216, 245, 106, 0.52)";
+  context.lineWidth = 3;
+  context.beginPath();
+  context.moveTo(1012, 138);
+  context.lineTo(1124, 138);
+  context.lineTo(1124, 250);
+  context.stroke();
+  context.strokeStyle = "rgba(86, 231, 199, 0.5)";
+  context.beginPath();
+  context.arc(1068, 194, 40, 0, Math.PI * 2);
+  context.stroke();
+  context.beginPath();
+  context.arc(1068, 194, 70, 0.2, Math.PI * 1.72);
+  context.stroke();
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function terrainCorePoint(entry: WalkMountainEntry) {
+  const centerSurfaceHeight = repositoryTerrainHeightAt(entry.repository, entry, 0, 0);
+  return new THREE.Vector3(
+    entry.x,
+    Math.max(24, Math.min(centerSurfaceHeight + 10, entry.height * 0.32 + 28)),
+    entry.z,
+  );
+}
+
+function createTerrainHologram(entry: WalkMountainEntry) {
+  const corePoint = terrainCorePoint(entry);
+  const group = new THREE.Group();
+  group.name = `terrain-hologram:${entry.repository.id}`;
+  const panelY = Math.max(170, Math.min(300, entry.height - corePoint.y + 156));
+  const terrainColor = new THREE.Color(entry.repository.color);
+  const accentColor = new THREE.Color("#d8f56a");
+  const texture = createHologramTexture(entry.repository);
+
+  const panel = new THREE.Mesh(
+    new THREE.PlaneGeometry(430, 242),
+    new THREE.MeshBasicMaterial({
+      color: "#ffffff",
+      map: texture ?? undefined,
+      transparent: true,
+      opacity: 0.96,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+  );
+  panel.name = "hologram-panel";
+  panel.position.set(0, panelY, 0);
+  panel.renderOrder = 8;
+  panel.userData.billboard = true;
+  panel.userData.baseY = panelY;
+  panel.userData.baseScale = 1;
+  group.add(panel);
+
+  const glow = new THREE.Mesh(
+    new THREE.PlaneGeometry(520, 318),
+    new THREE.MeshBasicMaterial({
+      color: accentColor,
+      transparent: true,
+      opacity: 0.07,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  glow.name = "hologram-glow";
+  glow.position.set(0, panelY, -1);
+  glow.renderOrder = 7;
+  glow.userData.billboard = true;
+  glow.userData.baseY = panelY;
+  glow.userData.baseScale = 1;
+  group.add(glow);
+
+  const ringMaterial = new THREE.MeshBasicMaterial({
+    color: accentColor,
+    transparent: true,
+    opacity: 0.34,
+    depthTest: false,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+  });
+  const ring = new THREE.Mesh(new THREE.RingGeometry(72, 82, 128), ringMaterial);
+  ring.name = "hologram-ring";
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.y = 2;
+  group.add(ring);
+
+  const innerRing = new THREE.Mesh(
+    new THREE.RingGeometry(30, 33, 96),
+    new THREE.MeshBasicMaterial({
+      color: terrainColor,
+      transparent: true,
+      opacity: 0.42,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  innerRing.name = "hologram-ring";
+  innerRing.rotation.x = -Math.PI / 2;
+  innerRing.position.y = 4;
+  group.add(innerRing);
+
+  const pulseRing = new THREE.Mesh(
+    new THREE.RingGeometry(104, 108, 128),
+    new THREE.MeshBasicMaterial({
+      color: accentColor,
+      transparent: true,
+      opacity: 0.18,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  pulseRing.name = "hologram-pulse-ring";
+  pulseRing.rotation.x = -Math.PI / 2;
+  pulseRing.position.y = 3;
+  pulseRing.userData.pulseBaseScale = 1;
+  group.add(pulseRing);
+
+  const beam = new THREE.Mesh(
+    new THREE.CylinderGeometry(34, 4, panelY * 0.9, 42, 1, true),
+    new THREE.MeshBasicMaterial({
+      color: accentColor,
+      transparent: true,
+      opacity: 0.12,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  beam.name = "hologram-beam";
+  beam.position.y = (panelY * 0.9) / 2;
+  group.add(beam);
+
+  const coreHalo = new THREE.Mesh(
+    new THREE.SphereGeometry(32, 32, 18),
+    new THREE.MeshBasicMaterial({
+      color: terrainColor,
+      transparent: true,
+      opacity: 0.24,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  coreHalo.name = "hologram-core";
+  coreHalo.userData.pulseBaseScale = 1;
+  group.add(coreHalo);
+
+  const connector = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, 12, 0),
+      new THREE.Vector3(0, panelY - 116, 0),
+    ]),
+    new THREE.LineBasicMaterial({
+      color: "#d8f56a",
+      transparent: true,
+      opacity: 0.8,
+      depthTest: false,
+      depthWrite: false,
+    }),
+  );
+  group.add(connector);
+
+  const marker = new THREE.Mesh(
+    new THREE.SphereGeometry(16, 28, 16),
+    new THREE.MeshBasicMaterial({
+      color: accentColor,
+      transparent: true,
+      opacity: 0.86,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  marker.name = "hologram-core";
+  marker.userData.pulseBaseScale = 1;
+  group.add(marker);
+
+  group.position.copy(corePoint);
+  return group;
 }
 
 export default function WalkModeScene({ repositories, selectedId, year, language, onSelect, onPositionChange, onReady, initialPosition }: WalkModeSceneProps) {
@@ -437,7 +774,7 @@ export default function WalkModeScene({ repositories, selectedId, year, language
     const mountainGroup = new THREE.Group();
     scene.add(mountainGroup);
 
-    const mountainEntries = repositories.map((repository) => {
+    const mountainEntries: WalkMountainEntry[] = repositories.map((repository) => {
       const geometry = terraWalkGeometry(repository, year);
       const selected = repository.id === selectedIdRef.current;
       const dimmed = !repositoryHasLanguage(repository, language);
@@ -468,18 +805,6 @@ export default function WalkModeScene({ repositories, selectedId, year, language
       wireframe.position.set(geometry.x, 0.4, geometry.z);
       mountainGroup.add(wireframe);
 
-      const foothillMaterial = new THREE.MeshBasicMaterial({
-        color,
-        transparent: true,
-        opacity: selected ? 0.2 : dimmed ? 0.04 : 0.12,
-        depthWrite: false,
-      });
-      const foothill = new THREE.Mesh(new THREE.CircleGeometry(1, 96), foothillMaterial);
-      foothill.scale.set(geometry.radiusX * 1.42, geometry.radiusZ * 1.52, 1);
-      foothill.rotation.x = -Math.PI / 2;
-      foothill.position.set(geometry.x, 0.1, geometry.z);
-      mountainGroup.add(foothill);
-
       const contourMaterial = new THREE.LineBasicMaterial({
         color,
         transparent: true,
@@ -505,12 +830,20 @@ export default function WalkModeScene({ repositories, selectedId, year, language
       contours.position.set(geometry.x, 0.08, geometry.z);
       mountainGroup.add(contours);
 
-      return { repository, dimmed, ...geometry, mountain, wireframe, contours, foothill, material, wireframeMaterial, contourMaterial, foothillMaterial };
+      return { repository, dimmed, ...geometry, mountain, wireframe, contours, material, wireframeMaterial, contourMaterial };
     });
 
     const grassField = createGrassField(mountainEntries);
     grassField.position.y = 0.04;
     scene.add(grassField);
+
+    const raycaster = new THREE.Raycaster();
+    raycaster.far = POSITION_WORLD_SIZE;
+    const reticlePoint = new THREE.Vector2(0, 0);
+    const terrainMeshes = mountainEntries.map((entry) => entry.mountain);
+    const terrainEntryByMesh = new Map<THREE.Object3D, WalkMountainEntry>(
+      mountainEntries.map((entry) => [entry.mountain, entry]),
+    );
 
     let yaw = 0;
     let pitch = 0;
@@ -518,6 +851,7 @@ export default function WalkModeScene({ repositories, selectedId, year, language
     const clock = new THREE.Clock();
     let animationFrame = 0;
     let currentNearestId = "";
+    let activeHologram: THREE.Group | null = null;
     let lastPositionReport = 0;
     let readyReported = false;
 
@@ -561,8 +895,20 @@ export default function WalkModeScene({ repositories, selectedId, year, language
         entry.material.opacity = selected ? 0.98 : entry.dimmed ? 0.2 : 0.88;
         entry.wireframeMaterial.opacity = selected ? 0.24 : entry.dimmed ? 0.035 : 0.15;
         entry.contourMaterial.opacity = selected ? 0.58 : entry.dimmed ? 0.06 : 0.24;
-        entry.foothillMaterial.opacity = selected ? 0.22 : entry.dimmed ? 0.04 : 0.12;
       });
+    };
+
+    const clearTerrainHologram = () => {
+      if (!activeHologram) return;
+      scene.remove(activeHologram);
+      disposeObject(activeHologram);
+      activeHologram = null;
+    };
+
+    const showTerrainHologram = (entry: WalkMountainEntry) => {
+      clearTerrainHologram();
+      activeHologram = createTerrainHologram(entry);
+      scene.add(activeHologram);
     };
 
     const resize = () => {
@@ -582,7 +928,23 @@ export default function WalkModeScene({ repositories, selectedId, year, language
     };
 
     const handleCanvasClick = () => {
-      renderer.domElement.requestPointerLock();
+      if (document.pointerLockElement !== renderer.domElement) {
+        renderer.domElement.requestPointerLock();
+        return;
+      }
+
+      raycaster.setFromCamera(reticlePoint, camera);
+      const hit = raycaster.intersectObjects(terrainMeshes, false)[0];
+      const entry = hit ? terrainEntryByMesh.get(hit.object) : null;
+      if (!entry) return;
+
+      currentNearestId = entry.repository.id;
+      setNearestRepository(entry.repository);
+      onSelectRef.current(entry.repository.id);
+      selectedIdRef.current = entry.repository.id;
+      selectedLight.position.set(entry.x, entry.height + 4, entry.z);
+      syncSelectedVisuals();
+      showTerrainHologram(entry);
     };
 
     const handleMouseMove = (event: MouseEvent) => {
@@ -614,6 +976,28 @@ export default function WalkModeScene({ repositories, selectedId, year, language
       const delta = Math.min(0.05, clock.getDelta());
       const grassTime = grassField.material.uniforms.uTime;
       if (grassTime) grassTime.value = clock.elapsedTime;
+      if (activeHologram) {
+        const bob = Math.sin(clock.elapsedTime * 2.4) * 4;
+        const corePulse = 1 + Math.sin(clock.elapsedTime * 4.2) * 0.12;
+        const distanceToHologram = camera.position.distanceTo(activeHologram.position);
+        const panelScale = THREE.MathUtils.clamp(distanceToHologram / 520, 0.58, 1);
+        activeHologram.traverse((child) => {
+          if (child.userData.billboard) child.quaternion.copy(camera.quaternion);
+          if (typeof child.userData.baseY === "number") child.position.y = child.userData.baseY + bob;
+          if (typeof child.userData.baseScale === "number") child.scale.setScalar(child.userData.baseScale * panelScale);
+          if (child.name === "hologram-ring") child.rotation.z += delta * 1.6;
+          if (child.name === "hologram-pulse-ring") {
+            child.rotation.z -= delta * 1.1;
+            child.scale.setScalar(1 + ((clock.elapsedTime * 0.85) % 1) * 0.42);
+            const material = (child as THREE.Mesh).material as THREE.MeshBasicMaterial;
+            material.opacity = 0.22 * (1 - ((clock.elapsedTime * 0.85) % 1));
+          }
+          if (child.name === "hologram-core") {
+            const baseScale = typeof child.userData.pulseBaseScale === "number" ? child.userData.pulseBaseScale : 1;
+            child.scale.setScalar(baseScale * corePulse);
+          }
+        });
+      }
       const speed = (keys.has("run") ? 290 : 138) * delta;
       let forward = 0;
       let strafe = 0;
@@ -685,6 +1069,7 @@ export default function WalkModeScene({ repositories, selectedId, year, language
       window.removeEventListener("keyup", handleKeyUp);
       if (document.pointerLockElement === renderer.domElement) document.exitPointerLock();
       reportWalkPosition();
+      clearTerrainHologram();
       scene.remove(grassField);
       host.removeChild(renderer.domElement);
       disposeObject(scene);
