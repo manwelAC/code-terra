@@ -5,6 +5,8 @@ import * as THREE from "three";
 import { compactNumber, repositoryHasLanguage, type LanguageFilter, type TerrainRepository } from "@/lib/repositories";
 import { createCachedCloudLayer } from "@/components/walk-mode-clouds";
 import { createCachedFireflyField } from "@/components/walk-mode-fireflies";
+import { animateRepositoryCoreRoom, createRepositoryCoreRoom } from "@/components/walk-mode-core-room";
+import { createCachedLightTrails } from "@/components/walk-mode-light-trails";
 import { createCachedStarField } from "@/components/walk-mode-stars";
 import { createRepositoryTerrainGeometry, repositoryTerrainHeightAt } from "@/components/walk-mode-terrain";
 
@@ -33,6 +35,8 @@ const FIREFLY_COUNT = 45_000;
 const CLOUD_PUFF_COUNT = 7_500;
 const STAR_COUNT = 85_000;
 const GRASS_FIELD_SIZE = GROUND_SIZE * 0.9;
+const CORE_ROOM_EYE_HEIGHT = 78;
+const CORE_ROOM_BOUNDARY = 84;
 
 type GrassFieldMesh = THREE.Mesh<THREE.InstancedBufferGeometry, THREE.ShaderMaterial>;
 let grassFieldCache: { key: string; mesh: GrassFieldMesh } | null = null;
@@ -695,9 +699,13 @@ export default function WalkModeScene({ repositories, selectedId, year, language
   const onReadyRef = useRef(onReady);
   const selectedIdRef = useRef(selectedId);
   const initialPositionRef = useRef(initialPosition);
+  const pointerLockCooldownUntilRef = useRef(0);
   const [pointerLocked, setPointerLocked] = useState(false);
   const [sceneReady, setSceneReady] = useState(false);
   const [nearestRepository, setNearestRepository] = useState<TerrainRepository | null>(null);
+  const [coreRoomPromptRepository, setCoreRoomPromptRepository] = useState<TerrainRepository | null>(null);
+  const [coreRoomActiveRepository, setCoreRoomActiveRepository] = useState<TerrainRepository | null>(null);
+  const [coreRoomTransitioning, setCoreRoomTransitioning] = useState(false);
 
   useEffect(() => {
     onSelectRef.current = onSelect;
@@ -714,6 +722,15 @@ export default function WalkModeScene({ repositories, selectedId, year, language
   useEffect(() => {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
+
+  const requestWalkPointerLock = (canvas: HTMLCanvasElement | null | undefined) => {
+    if (!canvas || document.pointerLockElement === canvas) return;
+    if (performance.now() < pointerLockCooldownUntilRef.current) return;
+    const lockRequest = canvas.requestPointerLock() as Promise<void> | undefined;
+    lockRequest?.catch(() => {
+      pointerLockCooldownUntilRef.current = performance.now() + 1200;
+    });
+  };
 
   useEffect(() => {
     const host = hostRef.current;
@@ -861,6 +878,9 @@ export default function WalkModeScene({ repositories, selectedId, year, language
     });
     scene.add(starField);
 
+    const lightTrails = createCachedLightTrails(mountainEntries, GROUND_SIZE * 0.9);
+    scene.add(lightTrails);
+
     const raycaster = new THREE.Raycaster();
     raycaster.far = POSITION_WORLD_SIZE;
     const reticlePoint = new THREE.Vector2(0, 0);
@@ -876,6 +896,12 @@ export default function WalkModeScene({ repositories, selectedId, year, language
     let animationFrame = 0;
     let currentNearestId = "";
     let activeHologram: THREE.Group | null = null;
+    let activeCoreRoom: THREE.Group | null = null;
+    let activeCoreRoomRepositoryId = "";
+    let promptedCoreRoomEntry: WalkMountainEntry | null = null;
+    let terrainReturnPose: { position: THREE.Vector3; yaw: number; pitch: number } | null = null;
+    let coreRoomTransitionTimeout = 0;
+    let pointerLockWasActive = false;
     let lastPositionReport = 0;
     let readyReported = false;
 
@@ -929,10 +955,106 @@ export default function WalkModeScene({ repositories, selectedId, year, language
       activeHologram = null;
     };
 
+    const setExteriorVisible = (visible: boolean) => {
+      ground.visible = visible;
+      groundGlow.visible = visible;
+      grid.visible = visible;
+      mountainGroup.visible = visible;
+      grassField.visible = visible;
+      fireflyField.visible = visible;
+      cloudLayer.visible = visible;
+      starField.visible = visible;
+      lightTrails.visible = visible;
+    };
+
+    const clearCoreRoom = () => {
+      if (!activeCoreRoom) return;
+      scene.remove(activeCoreRoom);
+      disposeObject(activeCoreRoom);
+      activeCoreRoom = null;
+      activeCoreRoomRepositoryId = "";
+    };
+
     const showTerrainHologram = (entry: WalkMountainEntry) => {
       clearTerrainHologram();
       activeHologram = createTerrainHologram(entry);
       scene.add(activeHologram);
+    };
+
+    const showCoreRoom = (entry: WalkMountainEntry) => {
+      if (activeCoreRoomRepositoryId === entry.repository.id) return;
+      clearCoreRoom();
+      activeCoreRoom = createRepositoryCoreRoom({
+        repository: entry.repository,
+        radius: Math.min(entry.radiusX, entry.radiusZ),
+        height: entry.height,
+      });
+      activeCoreRoom.position.copy(terrainCorePoint(entry));
+      activeCoreRoomRepositoryId = entry.repository.id;
+      scene.add(activeCoreRoom);
+    };
+
+    const coreRoomWalkRadius = () => (
+      activeCoreRoom && typeof activeCoreRoom.userData.walkRadius === "number"
+        ? activeCoreRoom.userData.walkRadius
+        : CORE_ROOM_BOUNDARY
+    );
+
+    const coreRoomEyeHeight = () => (
+      activeCoreRoom && typeof activeCoreRoom.userData.eyeHeight === "number"
+        ? activeCoreRoom.userData.eyeHeight
+        : CORE_ROOM_EYE_HEIGHT
+    );
+
+    const coreRoomSpawnOffset = () => (
+      activeCoreRoom && typeof activeCoreRoom.userData.spawnOffset === "number"
+        ? activeCoreRoom.userData.spawnOffset
+        : CORE_ROOM_BOUNDARY * 0.46
+    );
+
+    const beginCoreRoomTransition = () => {
+      setCoreRoomTransitioning(true);
+      if (coreRoomTransitionTimeout) window.clearTimeout(coreRoomTransitionTimeout);
+      coreRoomTransitionTimeout = window.setTimeout(() => {
+        setCoreRoomTransitioning(false);
+        coreRoomTransitionTimeout = 0;
+      }, 620);
+    };
+
+    const enterCoreRoom = (entry: WalkMountainEntry) => {
+      terrainReturnPose = {
+        position: camera.position.clone(),
+        yaw,
+        pitch,
+      };
+      promptedCoreRoomEntry = null;
+      setCoreRoomPromptRepository(null);
+      beginCoreRoomTransition();
+      clearTerrainHologram();
+      showCoreRoom(entry);
+      setExteriorVisible(false);
+      setCoreRoomActiveRepository(entry.repository);
+
+      const corePoint = terrainCorePoint(entry);
+      camera.position.set(corePoint.x, corePoint.y + coreRoomEyeHeight(), corePoint.z + coreRoomSpawnOffset());
+      yaw = 0;
+      pitch = -0.18;
+      setCameraRotation();
+    };
+
+    const exitCoreRoom = () => {
+      if (!activeCoreRoom) return;
+      beginCoreRoomTransition();
+      setExteriorVisible(true);
+      clearCoreRoom();
+      setCoreRoomActiveRepository(null);
+      if (terrainReturnPose) {
+        camera.position.copy(terrainReturnPose.position);
+        yaw = terrainReturnPose.yaw;
+        pitch = terrainReturnPose.pitch;
+        setCameraRotation();
+      }
+      terrainReturnPose = null;
     };
 
     const resize = () => {
@@ -948,14 +1070,24 @@ export default function WalkModeScene({ repositories, selectedId, year, language
     resize();
 
     const handlePointerLockChange = () => {
-      setPointerLocked(document.pointerLockElement === renderer.domElement);
+      const locked = document.pointerLockElement === renderer.domElement;
+      if (!locked && pointerLockWasActive) {
+        pointerLockCooldownUntilRef.current = performance.now() + 1200;
+      }
+      pointerLockWasActive = locked;
+      setPointerLocked(locked);
+    };
+
+    const handlePointerLockError = () => {
+      pointerLockCooldownUntilRef.current = performance.now() + 1200;
     };
 
     const handleCanvasClick = () => {
       if (document.pointerLockElement !== renderer.domElement) {
-        renderer.domElement.requestPointerLock();
+        requestWalkPointerLock(renderer.domElement);
         return;
       }
+      if (activeCoreRoom) return;
 
       raycaster.setFromCamera(reticlePoint, camera);
       const hit = raycaster.intersectObjects(terrainMeshes, false)[0];
@@ -969,6 +1101,8 @@ export default function WalkModeScene({ repositories, selectedId, year, language
       selectedLight.position.set(entry.x, entry.height + 4, entry.z);
       syncSelectedVisuals();
       showTerrainHologram(entry);
+      promptedCoreRoomEntry = entry;
+      setCoreRoomPromptRepository(entry.repository);
     };
 
     const handleMouseMove = (event: MouseEvent) => {
@@ -979,6 +1113,13 @@ export default function WalkModeScene({ repositories, selectedId, year, language
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() === "f") {
+        if (activeCoreRoom) exitCoreRoom();
+        else if (promptedCoreRoomEntry) enterCoreRoom(promptedCoreRoomEntry);
+        event.preventDefault();
+        return;
+      }
+
       const key = movementKey(event.key.toLowerCase());
       if (!key) return;
       keys.add(key);
@@ -992,6 +1133,7 @@ export default function WalkModeScene({ repositories, selectedId, year, language
 
     renderer.domElement.addEventListener("click", handleCanvasClick);
     document.addEventListener("pointerlockchange", handlePointerLockChange);
+    document.addEventListener("pointerlockerror", handlePointerLockError);
     document.addEventListener("mousemove", handleMouseMove);
     window.addEventListener("keydown", handleKeyDown);
     window.addEventListener("keyup", handleKeyUp);
@@ -1006,6 +1148,8 @@ export default function WalkModeScene({ repositories, selectedId, year, language
       if (cloudTime) cloudTime.value = clock.elapsedTime;
       const starTime = starField.material.uniforms.uTime;
       if (starTime) starTime.value = clock.elapsedTime;
+      const lightTrailTime = lightTrails.material.uniforms.uTime;
+      if (lightTrailTime) lightTrailTime.value = clock.elapsedTime;
       if (activeHologram) {
         const bob = Math.sin(clock.elapsedTime * 2.4) * 4;
         const corePulse = 1 + Math.sin(clock.elapsedTime * 4.2) * 0.12;
@@ -1028,6 +1172,7 @@ export default function WalkModeScene({ repositories, selectedId, year, language
           }
         });
       }
+      if (activeCoreRoom) animateRepositoryCoreRoom(activeCoreRoom, clock.elapsedTime, delta);
       const speed = (keys.has("run") ? 290 : 138) * delta;
       let forward = 0;
       let strafe = 0;
@@ -1042,12 +1187,25 @@ export default function WalkModeScene({ repositories, selectedId, year, language
         strafe /= length;
         const attemptedX = camera.position.x + (-Math.sin(yaw) * forward + Math.cos(yaw) * strafe) * speed;
         const attemptedZ = camera.position.z + (-Math.cos(yaw) * forward - Math.sin(yaw) * strafe) * speed;
-        const clampedAttemptX = Math.max(-boundary, Math.min(boundary, attemptedX));
-        const clampedAttemptZ = Math.max(-boundary, Math.min(boundary, attemptedZ));
-        camera.position.x = clampedAttemptX;
-        camera.position.z = clampedAttemptZ;
+        if (activeCoreRoom) {
+          const roomCenter = activeCoreRoom.position;
+          const dx = attemptedX - roomCenter.x;
+          const dz = attemptedZ - roomCenter.z;
+          const distance = Math.hypot(dx, dz);
+          const roomLimit = coreRoomWalkRadius();
+          const scale = distance > roomLimit ? roomLimit / distance : 1;
+          camera.position.x = roomCenter.x + dx * scale;
+          camera.position.z = roomCenter.z + dz * scale;
+        } else {
+          const clampedAttemptX = Math.max(-boundary, Math.min(boundary, attemptedX));
+          const clampedAttemptZ = Math.max(-boundary, Math.min(boundary, attemptedZ));
+          camera.position.x = clampedAttemptX;
+          camera.position.z = clampedAttemptZ;
+        }
       }
-      const targetEyeHeight = walkSurfaceHeightAt(camera.position.x, camera.position.z, mountainEntries) + EYE_HEIGHT;
+      const targetEyeHeight = activeCoreRoom
+        ? activeCoreRoom.position.y + coreRoomEyeHeight()
+        : walkSurfaceHeightAt(camera.position.x, camera.position.z, mountainEntries) + EYE_HEIGHT;
       camera.position.y += (targetEyeHeight - camera.position.y) * Math.min(1, delta * 16);
 
       const now = performance.now();
@@ -1056,23 +1214,25 @@ export default function WalkModeScene({ repositories, selectedId, year, language
         reportWalkPosition();
       }
 
-      let nearest = mountainEntries[0] ?? null;
-      let nearestDistance = Number.POSITIVE_INFINITY;
-      mountainEntries.forEach((entry) => {
-        const distance = Math.hypot(camera.position.x - entry.x, camera.position.z - entry.z);
-        if (distance < nearestDistance) {
-          nearest = entry;
-          nearestDistance = distance;
-        }
-      });
+      if (!activeCoreRoom) {
+        let nearest = mountainEntries[0] ?? null;
+        let nearestDistance = Number.POSITIVE_INFINITY;
+        mountainEntries.forEach((entry) => {
+          const distance = Math.hypot(camera.position.x - entry.x, camera.position.z - entry.z);
+          if (distance < nearestDistance) {
+            nearest = entry;
+            nearestDistance = distance;
+          }
+        });
 
-      if (nearest && nearest.repository.id !== currentNearestId) {
-        currentNearestId = nearest.repository.id;
-        setNearestRepository(nearest.repository);
-        onSelectRef.current(nearest.repository.id);
-        selectedIdRef.current = nearest.repository.id;
-        selectedLight.position.set(nearest.x, nearest.height + 4, nearest.z);
-        syncSelectedVisuals();
+        if (nearest && nearest.repository.id !== currentNearestId) {
+          currentNearestId = nearest.repository.id;
+          setNearestRepository(nearest.repository);
+          onSelectRef.current(nearest.repository.id);
+          selectedIdRef.current = nearest.repository.id;
+          selectedLight.position.set(nearest.x, nearest.height + 4, nearest.z);
+          syncSelectedVisuals();
+        }
       }
 
       renderer.render(scene, camera);
@@ -1094,15 +1254,22 @@ export default function WalkModeScene({ repositories, selectedId, year, language
       resizeObserver.disconnect();
       renderer.domElement.removeEventListener("click", handleCanvasClick);
       document.removeEventListener("pointerlockchange", handlePointerLockChange);
+      document.removeEventListener("pointerlockerror", handlePointerLockError);
       document.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
+      if (coreRoomTransitionTimeout) window.clearTimeout(coreRoomTransitionTimeout);
       if (document.pointerLockElement === renderer.domElement) document.exitPointerLock();
+      setCoreRoomPromptRepository(null);
+      setCoreRoomActiveRepository(null);
+      setCoreRoomTransitioning(false);
       reportWalkPosition();
       clearTerrainHologram();
+      clearCoreRoom();
       scene.remove(starField);
       scene.remove(cloudLayer);
       scene.remove(fireflyField);
+      scene.remove(lightTrails);
       scene.remove(grassField);
       host.removeChild(renderer.domElement);
       disposeObject(scene);
@@ -1123,12 +1290,40 @@ export default function WalkModeScene({ repositories, selectedId, year, language
       )}
       <span className="walk-reticle" aria-hidden="true" />
       <div className="walk-mode-hud">
-        <p>WALK MODE / FIRST PERSON</p>
-        <strong>{nearestRepository?.name ?? "Enter the terrain"}</strong>
-        <span>{nearestRepository ? `${nearestRepository.language} / ${compactNumber(nearestRepository.lines)} LOC` : "Click the scene, then walk with WASD"}</span>
+        <p>{coreRoomActiveRepository ? "CORE ROOM / REPOSITORY CHAMBER" : "WALK MODE / FIRST PERSON"}</p>
+        <strong>{coreRoomActiveRepository?.name ?? nearestRepository?.name ?? "Enter the terrain"}</strong>
+        <span>
+          {coreRoomActiveRepository
+            ? "Press F to return to terrain"
+            : nearestRepository ? `${nearestRepository.language} / ${compactNumber(nearestRepository.lines)} LOC` : "Click the scene, then walk with WASD"}
+        </span>
       </div>
+      {pointerLocked && coreRoomPromptRepository && !coreRoomActiveRepository && (
+        <div className="walk-core-room-prompt" role="status" aria-live="polite">
+          <p>Repository core detected</p>
+          <strong>{coreRoomPromptRepository.name}</strong>
+          <span>Press <kbd>F</kbd> to enter core room</span>
+        </div>
+      )}
+      {coreRoomTransitioning && (
+        <div className="walk-core-room-transition" role="status" aria-live="polite">
+          <span/>
+          <strong>{coreRoomActiveRepository ? "Entering core room" : "Returning to terrain"}</strong>
+        </div>
+      )}
+      {coreRoomActiveRepository && (
+        <aside className="walk-core-room-guide" aria-label="Core room legend">
+          <p>Reading the chamber</p>
+          <dl>
+            <div><dt>Core</dt><dd>{compactNumber(coreRoomActiveRepository.lines)} lines shape the archive orb.</dd></div>
+            <div><dt>Rings</dt><dd>{compactNumber(coreRoomActiveRepository.commits)} commits orbit the center.</dd></div>
+            <div><dt>Strata</dt><dd>{coreRoomActiveRepository.language} and language layers form the walls.</dd></div>
+            <div><dt>Nodes</dt><dd>{compactNumber(coreRoomActiveRepository.files)} files drift as inner points.</dd></div>
+          </dl>
+        </aside>
+      )}
       {!pointerLocked && (
-        <button type="button" className="walk-mode-prompt" onClick={() => hostRef.current?.querySelector("canvas")?.requestPointerLock()}>
+        <button type="button" className="walk-mode-prompt" onClick={() => requestWalkPointerLock(hostRef.current?.querySelector("canvas"))}>
           Click to walk
           <span>WASD to move / Mouse to look / Esc to release</span>
         </button>

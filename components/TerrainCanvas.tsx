@@ -347,6 +347,46 @@ function drawMountain(
   }
 }
 
+function drawAtlasClouds(
+  context: CanvasRenderingContext2D,
+  repositories: TerrainRepository[],
+  size: Size,
+  pan: Point,
+  transition: boolean,
+) {
+  if (transition || !repositories.length) return;
+  context.save();
+  context.globalCompositeOperation = "lighter";
+  const cloudCount = Math.min(7, Math.max(3, Math.ceil(repositories.length / 12)));
+
+  for (let cloud = 0; cloud < cloudCount; cloud += 1) {
+    const seedRepository = repositories[(cloud * 7) % repositories.length];
+    const anchorX = (seedRepository.seed % 997) / 997;
+    const anchorY = ((seedRepository.seed * 17) % 991) / 991;
+    const x = ((anchorX * size.width * 1.35 + pan.x * 0.045) % (size.width + 260)) - 130;
+    const y = size.height * (0.06 + anchorY * 0.28) + pan.y * 0.025;
+    const width = size.width * (0.08 + ((seedRepository.seed % 11) / 11) * 0.08);
+    const height = width * 0.28;
+    const puffCount = 3 + (seedRepository.seed % 3);
+
+    for (let puff = 0; puff < puffCount; puff += 1) {
+      const offset = (puff / Math.max(1, puffCount - 1) - 0.5) * width;
+      const puffX = x + offset + seededNoise(seedRepository.seed, puff, cloud) * width * 0.1;
+      const puffY = y + Math.sin(puff * 1.4 + cloud) * height * 0.2;
+      const radius = height * (0.72 + (puff % 3) * 0.18);
+      const gradient = context.createRadialGradient(puffX, puffY, 0, puffX, puffY, radius);
+      gradient.addColorStop(0, "rgba(196,232,207,0.075)");
+      gradient.addColorStop(0.58, "rgba(120,178,147,0.035)");
+      gradient.addColorStop(1, "rgba(120,178,147,0)");
+      context.fillStyle = gradient;
+      context.beginPath();
+      context.ellipse(puffX, puffY, radius * 1.9, radius * 0.72, seededNoise(seedRepository.seed, puff, cloud + 4) * 0.18, 0, Math.PI * 2);
+      context.fill();
+    }
+  }
+  context.restore();
+}
+
 function trimMountainSpriteCache() {
   while (mountainSpriteCache.size > MAX_MOUNTAIN_SPRITES) {
     const oldestKey = mountainSpriteCache.keys().next().value;
@@ -455,6 +495,8 @@ function drawTerrainScene(
   centerGlow.addColorStop(1, "rgba(216,245,106,0)");
   context.fillStyle = centerGlow;
   context.fillRect(0, 0, size.width, size.height);
+
+  drawAtlasClouds(context, repositories, size, pan, transition);
 
   context.strokeStyle = "rgba(188,222,190,0.055)";
   context.lineWidth = 0.55;

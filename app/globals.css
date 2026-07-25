@@ -1155,6 +1155,142 @@ main {
   font-weight: 400;
 }
 
+.walk-core-room-prompt {
+  position: absolute;
+  left: 50%;
+  bottom: 34px;
+  z-index: 4;
+  display: grid;
+  gap: 5px;
+  width: min(360px, calc(100% - 40px));
+  padding: 13px 15px;
+  border: 1px solid rgba(216,245,106,.32);
+  background: rgba(7,17,13,.78);
+  color: #f7ffd5;
+  text-align: center;
+  transform: translateX(-50%);
+  pointer-events: none;
+  backdrop-filter: blur(16px);
+}
+
+.walk-core-room-prompt p,
+.walk-core-room-prompt span,
+.walk-core-room-transition strong {
+  margin: 0;
+  font-family: var(--font-mono), monospace;
+  text-transform: uppercase;
+}
+
+.walk-core-room-prompt p {
+  color: #aab9ad;
+  font-size: 9px;
+  letter-spacing: .08em;
+}
+
+.walk-core-room-prompt strong {
+  overflow: hidden;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.walk-core-room-prompt span {
+  color: var(--lime);
+  font-size: 10px;
+}
+
+.walk-core-room-prompt kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 20px;
+  margin: 0 3px;
+  border: 1px solid rgba(216,245,106,.48);
+  background: rgba(216,245,106,.12);
+  color: #fff;
+  font-family: var(--font-mono), monospace;
+  font-size: 10px;
+}
+
+.walk-core-room-transition {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: grid;
+  place-items: center;
+  gap: 18px;
+  background: radial-gradient(circle at 50% 50%, rgba(216,245,106,.16), rgba(7,17,13,.88) 58%);
+  color: var(--lime);
+  pointer-events: none;
+  animation: walk-loading-in .22s ease both;
+}
+
+.walk-core-room-transition span {
+  width: 58px;
+  height: 58px;
+  border: 1px solid rgba(216,245,106,.72);
+  border-radius: 50%;
+  box-shadow: 0 0 38px rgba(216,245,106,.28);
+  animation: walk-loading-spin 1.15s linear infinite;
+}
+
+.walk-core-room-transition strong {
+  font-size: 11px;
+  letter-spacing: .16em;
+}
+
+.walk-core-room-guide {
+  position: absolute;
+  right: 18px;
+  bottom: 22px;
+  z-index: 4;
+  width: min(330px, calc(100% - 40px));
+  padding: 14px 15px;
+  border: 1px solid rgba(88,231,199,.24);
+  background: rgba(7,17,13,.76);
+  color: #edf5e9;
+  pointer-events: none;
+  backdrop-filter: blur(16px);
+}
+
+.walk-core-room-guide p {
+  margin: 0 0 11px;
+  color: var(--lime);
+  font-family: var(--font-mono), monospace;
+  font-size: 10px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.walk-core-room-guide dl {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+}
+
+.walk-core-room-guide div {
+  display: grid;
+  grid-template-columns: 58px 1fr;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.walk-core-room-guide dt {
+  color: #58e7c7;
+  font-family: var(--font-mono), monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.walk-core-room-guide dd {
+  margin: 0;
+  color: #d9e5d7;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .timeline-atlas-view {
   position: absolute;
   inset: 54px 0 0;
